@@ -36,7 +36,7 @@ export function getDownstream(cells, sourceName) {
   while (queue.length > 0) {
     const current = queue.shift()
     for (const [name, cell] of cells) {
-      if (cell.deps.includes(current) && !downstream.has(name)) {
+      if (cell.deps.has(current) && !downstream.has(name)) {
         downstream.add(name)
         queue.push(name)
       }
@@ -49,7 +49,6 @@ export function getDownstream(cells, sourceName) {
 export function topoLevels(cells, names) {
   const levels = []
   const placed = new Set()
-
   const remaining = new Set(names)
 
   while (remaining.size > 0) {
@@ -57,7 +56,7 @@ export function topoLevels(cells, names) {
     for (const name of remaining) {
       const cell = cells.get(name)
       if (!cell) continue
-      const depsReady = cell.deps.every(d => !remaining.has(d) || placed.has(d))
+      const depsReady = [...cell.deps].every(d => !remaining.has(d) || placed.has(d))
       if (depsReady) level.push(name)
     }
     if (level.length === 0) break

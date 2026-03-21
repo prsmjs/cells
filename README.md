@@ -23,29 +23,31 @@ import { createGraph } from "@prsm/cells"
 
 const g = createGraph()
 
-g.cell("price", 100)
-g.cell("tax", 0.08)
-g.cell("total", ["price", "tax"], (price, tax) => price * (1 + tax))
+const price = g.cell("price", 100)
+const tax = g.cell("tax", 0.08)
+const total = g.cell("total", () => price() * (1 + tax()))
 
-g.on("total", (value) => console.log("total:", value))
+total.on((value) => console.log("total:", value))
 
-g.set("price", 200) // total: 216
+price(200) // total: 216
 ```
+
+`g.cell()` returns an accessor function. Call it with no args to read, call it with an arg to write. Dependencies are tracked automatically - no dependency arrays needed.
 
 ## Async Cells
 
-Any cell computation can be async. Debounce prevents expensive work from firing on every upstream tick.
+Any cell computation can be async. Dependencies are tracked across `await` boundaries via `AsyncLocalStorage`. Debounce prevents expensive work from firing on every upstream tick.
 
 ```js
-g.cell("btc", 0)
-g.poll("btc", () => fetchPrice("BTC"), "10s")
+const btc = g.cell("btc", 0)
+btc.poll(() => fetchPrice("BTC"), "10s")
 
-g.cell("analysis", ["btc"], async (price) => {
-  return await llm.complete(`BTC at $${price}. Brief market analysis.`)
+const analysis = g.cell("analysis", async () => {
+  return await llm.complete(`BTC at $${btc()}. Brief market analysis.`)
 }, { debounce: "30s" })
 
-g.cell("alert", ["btc", "analysis"], (price, analysis) => {
-  return { price, analysis, timestamp: Date.now() }
+const alert = g.cell("alert", () => {
+  return { price: btc(), analysis: analysis(), timestamp: Date.now() }
 })
 ```
 
@@ -60,20 +62,20 @@ const g = createGraph({
   redis: { host: "127.0.0.1", port: 6379 }
 })
 
-g.cell("price", 0)
-g.cell("doubled", ["price"], (p) => p * 2)
+const price = g.cell("price", 0)
+const doubled = g.cell("doubled", () => price() * 2)
 
 await g.ready()
 ```
 
-`set()` on instance A propagates to instance B. Computed handlers run exactly once (lock winner computes, result is broadcast to all). Polling is coordinated so only one instance hits the external API per interval tick. Listeners fire on every instance, so each can push to its own connected clients.
+`price(100)` on instance A propagates to instance B. Computed handlers run exactly once (lock winner computes, result is broadcast to all). Polling is coordinated so only one instance hits the external API per interval tick. Listeners fire on every instance, so each can push to its own connected clients.
 
 ## API
 
 ### `createGraph(options?)`
 
 ```js
-const g = createGraph()                                    // local mode
+const g = createGraph()                                       // local mode
 const g = createGraph({ redis: { host: "...", port: 6379 } }) // distributed
 ```
 
@@ -85,72 +87,108 @@ Options:
 ### `g.cell(name, value)` - source cell
 
 ```js
-g.cell("config", { theme: "dark" })
+const config = g.cell("config", { theme: "dark" })
+config()                  // { theme: "dark" }
+config({ theme: "light" }) // updates value, triggers downstream
 ```
 
-### `g.cell(name, deps, fn, options?)` - computed cell
+### `g.cell(name, fn, options?)` - computed cell
 
 ```js
-g.cell("total", ["price", "tax"], (price, tax) => price * (1 + tax))
+const total = g.cell("total", () => price() * (1 + tax()))
 
-g.cell("summary", ["data"], async (data) => {
-  return await generateSummary(data)
+const summary = g.cell("summary", async () => {
+  return await generateSummary(data())
 }, { debounce: "5s" })
 ```
+
+Dependencies are discovered automatically by tracking which cell accessors are called during computation. Dependencies are re-tracked on every computation, so conditional deps work naturally.
 
 Options:
 - `debounce` - Duration string or ms. Delays recomputation after rapid dep changes
 - `equals` - Custom equality function `(prev, next) => boolean`
 
-### `g.set(name, value)` - update a source cell
+### Cell accessor methods
 
 ```js
-g.set("price", 200)
+const off = total.on((value, state) => { ... })   // observe changes
+off()                                               // unsubscribe
+
+total.onError((error, state) => { ... })           // observe errors
+
+total.state           // { value, status, error, updatedAt, computeTime }
+total.name            // "total"
+
+price.poll(fn, "10s") // fetch external data on a recurring interval
+price.stop()          // stop polling
+
+total.remove()        // remove (throws if other cells depend on it)
+price.removeTree()    // remove cell + all downstream
 ```
 
-### `g.get(name)` / `g.value(name)`
+### Graph-level methods
 
 ```js
-g.get("total")   // { value: 216, status: "current", error: null, ... }
-g.value("total") // 216
+g.set("price", 200)          // update source cell by name (escape hatch)
+g.get("total")               // full state by name
+g.value("total")             // value by name
+
+g.on((name, value, state) => { ... })  // wildcard listener
+g.snapshot()                  // { price: 200, tax: 0.08, total: 216 }
+g.cells()                    // graph topology + statuses
+
+await g.ready()               // required for distributed mode
+await g.destroy()             // tear down
 ```
 
-### `g.on(name, callback)` - observe changes
+## Polling
+
+`poll` is how external data enters the graph on a schedule. The fn runs on the given interval, and the result is set as the cell's value. If the fn throws, the cell enters error state and downstream cells go stale, but polling continues - the next successful poll clears the error.
+
+In distributed mode, polling is lock-coordinated so only one instance runs the fn per interval tick. The result propagates to all instances via Redis pub/sub.
+
+## Example: live dashboard
+
+A monitoring dashboard that polls services, derives health scores, and pushes state to connected clients.
 
 ```js
-const off = g.on("total", (value, state) => { ... })
-off() // unsubscribe
+import { createGraph } from "@prsm/cells"
 
-g.on("*", (name, value, state) => { ... }) // wildcard
+const g = createGraph({
+  redis: { host: "127.0.0.1", port: 6379 }
+})
+
+// sources: poll external services
+const dbLatency = g.cell("dbLatency", 0)
+dbLatency.poll(async () => {
+  const start = Date.now()
+  await db.query("SELECT 1")
+  return Date.now() - start
+}, "5s")
+
+const queueDepth = g.cell("queueDepth", 0)
+queueDepth.poll(() => queue.pending(), "5s")
+
+const errorRate = g.cell("errorRate", 0)
+errorRate.poll(() => metrics.errorRate("5m"), "10s")
+
+// derived: health score from all inputs
+const health = g.cell("health", () => {
+  const latency = dbLatency() > 200 ? 0 : 1
+  const queue = queueDepth() > 1000 ? 0 : 1
+  const errors = errorRate() > 0.05 ? 0 : 1
+  return { score: latency + queue + errors, max: 3 }
+})
+
+// push full state to clients whenever anything changes
+g.on(() => {
+  server.writeRecord("dashboard:health", g.snapshot())
+})
+
+await g.ready()
 ```
 
-### `g.onError(name, callback)` - observe errors
-
-```js
-g.onError("analysis", (error, state) => { ... })
-```
-
-### `g.snapshot()` - all cell values
-
-```js
-g.snapshot() // { price: 100, tax: 0.08, total: 108 }
-```
-
-### `g.poll(name, fn, interval)` / `g.stop(name)` - auto-refresh a source
-
-```js
-g.cell("btc", 0)
-g.poll("btc", () => fetchPrice("BTC"), "10s")
-g.stop("btc")
-```
-
-### `g.remove(name)` / `g.removeTree(name)` - remove cells
-
-### `g.cells()` - graph introspection
-
-### `g.ready()` - initialize (required for distributed mode)
-
-### `g.destroy()` - tear down
+Three instances can run this. Only one polls each service per tick. All three push to their own connected WebSocket clients.
 
 ## Behavior
 

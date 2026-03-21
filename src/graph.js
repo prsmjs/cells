@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks"
 import ms from "@prsm/ms"
 import { randomUUID } from "crypto"
 import { topoSort, getDownstream, topoLevels, valuesEqual } from "./propagate.js"
@@ -6,17 +7,21 @@ import { createRedisManager } from "./redis.js"
 const DEFAULT_LOCK_TTL = 30000
 const DEFAULT_PREFIX = "cell:"
 
+const tracking = new AsyncLocalStorage()
+
 export function createGraph(options = {}) {
   const prefix = options.prefix ?? DEFAULT_PREFIX
   const lockTtl = ms(options.lockTtl ?? DEFAULT_LOCK_TTL)
 
   const cells = new Map()
+  const accessors = new Map()
   const listeners = new Map()
   const errorListeners = new Map()
   const wildcardListeners = new Map()
   const pollTimers = new Map()
   const debounceTimers = new Map()
   const activePropagations = new Set()
+  const initialComputePromises = new Map()
   let redis = null
   let destroyed = false
 
@@ -28,7 +33,8 @@ export function createGraph(options = {}) {
     return {
       name,
       type: config.type,
-      deps: config.deps || [],
+      deps: new Set(config.deps || []),
+      dependents: new Set(),
       fn: config.fn || null,
       equals: config.equals || null,
       debounce: config.debounce || 0,
@@ -42,81 +48,277 @@ export function createGraph(options = {}) {
     }
   }
 
-  function allDepsReady(c) {
-    return c.deps.every(d => {
-      const dep = cells.get(d)
-      return dep && (dep.status === "current" || dep.status === "stale")
-    })
-  }
-
-  function cell(name, depsOrValue, fnOrOptions, maybeOptions) {
-    assertNotDestroyed()
-    if (cells.has(name)) throw new Error(`cell already exists: ${name}`)
-
-    if (Array.isArray(depsOrValue)) {
-      const deps = depsOrValue
-      const fn = fnOrOptions
-      const opts = maybeOptions || {}
-      const debounce = opts.debounce ? ms(opts.debounce) : 0
-
-      for (const dep of deps) {
-        if (dep === name) throw new Error(`cycle detected: ${name} -> ${name}`)
-      }
-
-      const c = makeCell(name, { type: "computed", deps, fn, debounce, equals: opts.equals })
-      cells.set(name, c)
-      checkCycles(name)
-
-      if (!options.redis && allDepsReady(c)) {
-        scheduleInitialCompute(name)
-      }
-
-      return graph
-    }
-
-    const c = makeCell(name, { type: "source", value: depsOrValue })
-    cells.set(name, c)
-    if (!options.redis) resolveWaiting(name)
-
-    return graph
-  }
-
-  function checkCycles(name) {
-    try {
-      topoSort(cells)
-    } catch (err) {
-      cells.delete(name)
-      throw err
-    }
-  }
-
-  function resolveWaiting(readyName) {
+  function rebuildDependents() {
+    for (const c of cells.values()) c.dependents.clear()
     for (const [name, c] of cells) {
-      if (c.type !== "computed") continue
-      if (c.status !== "uninitialized") continue
-      if (!c.deps.includes(readyName)) continue
-      if (!allDepsReady(c)) continue
-      scheduleInitialCompute(name)
+      for (const dep of c.deps) {
+        const parent = cells.get(dep)
+        if (parent) parent.dependents.add(name)
+      }
     }
   }
 
-  function scheduleInitialCompute(name) {
+  function allDepsReady(c) {
+    if (c.deps.size === 0) return true
+    for (const d of c.deps) {
+      const dep = cells.get(d)
+      if (!dep || (dep.status !== "current" && dep.status !== "stale")) return false
+    }
+    return true
+  }
+
+  function triggerInitialCompute(name) {
+    if (initialComputePromises.has(name)) return initialComputePromises.get(name)
+    const c = cells.get(name)
+    if (!c || c.type !== "computed" || c.status !== "uninitialized") return null
+
+    c.status = "pending"
+    const p = executeCompute(name)
+    initialComputePromises.set(name, p)
+    activePropagations.add(p)
+    p.finally(() => {
+      activePropagations.delete(p)
+      initialComputePromises.delete(name)
+    })
+    return p
+  }
+
+  function isAsyncFn(fn) {
+    return fn.constructor.name === "AsyncFunction"
+  }
+
+  function computeSync(name) {
     const c = cells.get(name)
     if (!c || c.type !== "computed") return
     if (c.status !== "uninitialized") return
 
     c.status = "pending"
-    doInitialCompute(name)
+    const tracker = { deps: new Set() }
+    const start = Date.now()
+    try {
+      const result = tracking.run(tracker, c.fn)
+      if (result && typeof result.then === "function") {
+        const newDeps = tracker.deps
+        newDeps.delete(name)
+        c.deps = newDeps
+        rebuildDependents()
+        c.status = "pending"
+        // re-use this promise rather than creating a new one
+        const p = (async () => {
+          try {
+            const val = await result
+            if (c.generation !== 0) return
+            c.value = val
+            c.status = "current"
+            c.error = null
+            c.updatedAt = Date.now()
+            c.computeTime = Date.now() - start
+            fireListeners(name, val, getState(name))
+          } catch (err) {
+            if (c.generation !== 0) return
+            c.status = "error"
+            c.error = err
+            c.computeTime = Date.now() - start
+            markDownstreamStale(name)
+            fireErrorListeners(name, err, getState(name))
+          }
+        })()
+        initialComputePromises.set(name, p)
+        activePropagations.add(p)
+        p.finally(() => {
+          activePropagations.delete(p)
+          initialComputePromises.delete(name)
+        })
+        return
+      }
+
+      const newDeps = tracker.deps
+
+      if (newDeps.has(name)) {
+        const err = new Error(`cycle detected: ${name} -> ${name}`)
+        c.deps = new Set()
+        rebuildDependents()
+        c.status = "error"
+        c.error = err
+        c.computeTime = Date.now() - start
+        fireErrorListeners(name, err, getState(name))
+        return
+      }
+
+      c.deps = newDeps
+      rebuildDependents()
+
+      try {
+        topoSort(cells)
+      } catch (err) {
+        c.status = "error"
+        c.error = err
+        c.computeTime = Date.now() - start
+        fireErrorListeners(name, err, getState(name))
+        return
+      }
+
+      c.value = result
+      c.status = "current"
+      c.error = null
+      c.updatedAt = Date.now()
+      c.computeTime = Date.now() - start
+
+      const state = getState(name)
+      fireListeners(name, result, state)
+    } catch (err) {
+      const newDeps = tracker.deps
+      newDeps.delete(name)
+      c.deps = newDeps
+      rebuildDependents()
+
+      c.status = "error"
+      c.error = err
+      c.computeTime = Date.now() - start
+      markDownstreamStale(name)
+      fireErrorListeners(name, err, getState(name))
+    }
   }
 
-  function doInitialCompute(name) {
-    queueMicrotask(() => {
-      const p = runSingleCompute(name).then(() => {
-        resolveWaiting(name)
-      })
-      activePropagations.add(p)
-      p.finally(() => activePropagations.delete(p))
+  function createAccessor(name) {
+    const accessor = (...args) => {
+      if (args.length > 0) {
+        set(name, args[0])
+        return
+      }
+
+      const tracker = tracking.getStore()
+      if (tracker) tracker.deps.add(name)
+
+      const c = cells.get(name)
+      if (!c) return undefined
+      if (c.status === "error") return undefined
+
+      if (c.status === "uninitialized" && c.type === "computed" && !tracker?.discovering) {
+        computeSync(name)
+      }
+
+      if (c.status === "uninitialized") return undefined
+      return c.value
+    }
+
+    accessor.on = (callback) => {
+      assertNotDestroyed()
+      const id = randomUUID()
+      if (!listeners.has(name)) listeners.set(name, new Map())
+      listeners.get(name).set(id, callback)
+      return () => {
+        const map = listeners.get(name)
+        if (map) map.delete(id)
+      }
+    }
+
+    accessor.onError = (callback) => {
+      assertNotDestroyed()
+      const id = randomUUID()
+      if (!errorListeners.has(name)) errorListeners.set(name, new Map())
+      errorListeners.get(name).set(id, callback)
+      return () => {
+        const map = errorListeners.get(name)
+        if (map) map.delete(id)
+      }
+    }
+
+    Object.defineProperty(accessor, "state", {
+      get() {
+        return getState(name)
+      },
     })
+
+    accessor.poll = (fn, interval) => {
+      poll(name, fn, interval)
+      return accessor
+    }
+
+    accessor.stop = () => {
+      stop(name)
+    }
+
+    accessor.remove = () => {
+      remove(name)
+    }
+
+    accessor.removeTree = () => {
+      removeTree(name)
+    }
+
+    Object.defineProperty(accessor, "name", {
+      value: name,
+      writable: false,
+    })
+
+    return accessor
+  }
+
+  let initialComputeScheduled = false
+
+  function cell(name, valueOrFn, maybeOptions) {
+    assertNotDestroyed()
+    if (cells.has(name)) throw new Error(`cell already exists: ${name}`)
+
+    if (typeof valueOrFn === "function") {
+      const fn = valueOrFn
+      const opts = maybeOptions || {}
+      const debounce = opts.debounce ? ms(opts.debounce) : 0
+
+      const c = makeCell(name, { type: "computed", deps: [], fn, debounce, equals: opts.equals })
+      cells.set(name, c)
+
+      const acc = createAccessor(name)
+      accessors.set(name, acc)
+
+      if (!options.redis) {
+        scheduleInitialComputeBatch()
+      }
+
+      return acc
+    }
+
+    const c = makeCell(name, { type: "source", value: valueOrFn })
+    cells.set(name, c)
+    rebuildDependents()
+
+    const acc = createAccessor(name)
+    accessors.set(name, acc)
+
+    if (!options.redis) scheduleInitialComputeBatch()
+
+    return acc
+  }
+
+  function scheduleInitialComputeBatch() {
+    if (initialComputeScheduled) return
+    initialComputeScheduled = true
+    queueMicrotask(() => {
+      initialComputeScheduled = false
+      runInitialComputes()
+    })
+  }
+
+  function runInitialComputes() {
+    let didCompute = true
+    while (didCompute) {
+      didCompute = false
+      for (const [name, c] of cells) {
+        if (c.type === "computed" && c.status === "uninitialized") {
+          computeSync(name)
+          if (c.status === "current" || c.status === "error") {
+            didCompute = true
+          }
+        }
+      }
+    }
+
+    for (const [name, c] of cells) {
+      if (c.type === "computed" && c.status === "uninitialized" && !initialComputePromises.has(name)) {
+        triggerInitialCompute(name)
+      }
+    }
   }
 
   async function runSingleCompute(name) {
@@ -137,6 +339,19 @@ export function createGraph(options = {}) {
     return await executeCompute(name)
   }
 
+  async function ensureDepsReady(deps) {
+    for (const depName of deps) {
+      const dep = cells.get(depName)
+      if (dep && dep.type === "computed" && (dep.status === "uninitialized" || dep.status === "pending")) {
+        if (dep.status === "uninitialized") {
+          triggerInitialCompute(depName)
+        }
+        const p = initialComputePromises.get(depName)
+        if (p) await p
+      }
+    }
+  }
+
   async function executeCompute(name) {
     const c = cells.get(name)
     if (!c) return false
@@ -145,13 +360,32 @@ export function createGraph(options = {}) {
     const wasError = c.status === "error"
     c.status = "pending"
 
-    const depValues = c.deps.map(d => cells.get(d)?.value)
+    await ensureDepsReady(c.deps)
 
     const start = Date.now()
     try {
-      const result = await c.fn(...depValues)
+      const tracker = { deps: new Set() }
+      const result = await tracking.run(tracker, c.fn)
 
       if (c.generation !== gen) return false
+
+      const newDeps = tracker.deps
+      newDeps.delete(name)
+
+      if (!setsEqual(c.deps, newDeps)) {
+        c.deps = newDeps
+        rebuildDependents()
+
+        try {
+          topoSort(cells)
+        } catch (err) {
+          c.status = "error"
+          c.error = err
+          c.computeTime = Date.now() - start
+          fireErrorListeners(name, err, getState(name))
+          return false
+        }
+      }
 
       const oldValue = c.value
       c.value = result
@@ -184,6 +418,14 @@ export function createGraph(options = {}) {
       fireErrorListeners(name, err, state)
       return false
     }
+  }
+
+  function setsEqual(a, b) {
+    if (a.size !== b.size) return false
+    for (const v of a) {
+      if (!b.has(v)) return false
+    }
+    return true
   }
 
   function set(name, value) {
@@ -236,8 +478,8 @@ export function createGraph(options = {}) {
       const eligible = level.filter(name => {
         const c = cells.get(name)
         if (!c) return false
-        if (c.deps.some(d => cells.get(d)?.status === "error")) return false
-        return c.deps.some(d => changed.has(d))
+        if ([...c.deps].some(d => cells.get(d)?.status === "error")) return false
+        return [...c.deps].some(d => changed.has(d))
       })
 
       if (eligible.length === 0) continue
@@ -310,6 +552,8 @@ export function createGraph(options = {}) {
   }
 
   function value(name) {
+    const tracker = tracking.getStore()
+    if (tracker) tracker.deps.add(name)
     const c = cells.get(name)
     if (!c || c.status === "uninitialized" || c.status === "error") return undefined
     return c.value
@@ -325,30 +569,11 @@ export function createGraph(options = {}) {
     return snap
   }
 
-  function on(name, callback) {
+  function on(callback) {
     assertNotDestroyed()
     const id = randomUUID()
-    if (name === "*") {
-      wildcardListeners.set(id, callback)
-      return () => wildcardListeners.delete(id)
-    }
-    if (!listeners.has(name)) listeners.set(name, new Map())
-    listeners.get(name).set(id, callback)
-    return () => {
-      const map = listeners.get(name)
-      if (map) map.delete(id)
-    }
-  }
-
-  function onError(name, callback) {
-    assertNotDestroyed()
-    const id = randomUUID()
-    if (!errorListeners.has(name)) errorListeners.set(name, new Map())
-    errorListeners.get(name).set(id, callback)
-    return () => {
-      const map = errorListeners.get(name)
-      if (map) map.delete(id)
-    }
+    wildcardListeners.set(id, callback)
+    return () => wildcardListeners.delete(id)
   }
 
   function fireListeners(name, val, state) {
@@ -433,7 +658,7 @@ export function createGraph(options = {}) {
     assertNotDestroyed()
 
     for (const [n, c] of cells) {
-      if (n !== name && c.deps.includes(name)) {
+      if (n !== name && c.deps.has(name)) {
         throw new Error(`cannot remove "${name}": "${n}" depends on it`)
       }
     }
@@ -459,23 +684,21 @@ export function createGraph(options = {}) {
     if (dt) clearTimeout(dt)
     debounceTimers.delete(name)
     cells.delete(name)
+    accessors.delete(name)
     listeners.delete(name)
     errorListeners.delete(name)
+    rebuildDependents()
     if (redis) redis.deleteValue(name).catch(() => {})
   }
 
   function getCells() {
     const result = []
     for (const [name, c] of cells) {
-      const dependents = []
-      for (const [n, other] of cells) {
-        if (other.deps.includes(name)) dependents.push(n)
-      }
       result.push({
         name,
         type: c.type,
         deps: [...c.deps],
-        dependents,
+        dependents: [...c.dependents],
         status: c.status,
       })
     }
@@ -503,8 +726,8 @@ export function createGraph(options = {}) {
     }
 
     for (const [name, c] of cells) {
-      if (c.type === "computed" && c.status === "uninitialized" && allDepsReady(c)) {
-        scheduleInitialCompute(name)
+      if (c.type === "computed" && c.status === "uninitialized") {
+        triggerInitialCompute(name)
       }
     }
 
@@ -542,6 +765,7 @@ export function createGraph(options = {}) {
     debounceTimers.clear()
     await Promise.all(activePropagations).catch(() => {})
     cells.clear()
+    accessors.clear()
     listeners.clear()
     errorListeners.clear()
     wildcardListeners.clear()
@@ -558,11 +782,6 @@ export function createGraph(options = {}) {
     value,
     snapshot,
     on,
-    onError,
-    poll,
-    stop,
-    remove,
-    removeTree,
     cells: getCells,
     ready,
     destroy,

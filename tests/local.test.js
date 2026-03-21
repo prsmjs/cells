@@ -10,23 +10,21 @@ describe("local mode", () => {
 
   describe("source cells", () => {
     it("defines a source cell with initial value", () => {
-      g.cell("price", 100)
-      const state = g.get("price")
-      expect(state.value).toBe(100)
-      expect(state.status).toBe("current")
-      expect(state.error).toBeNull()
+      const price = g.cell("price", 100)
+      expect(price()).toBe(100)
+      expect(price.state.status).toBe("current")
+      expect(price.state.error).toBeNull()
     })
 
     it("defines a source cell with object value", () => {
-      g.cell("config", { theme: "dark" })
-      expect(g.value("config")).toEqual({ theme: "dark" })
+      const config = g.cell("config", { theme: "dark" })
+      expect(config()).toEqual({ theme: "dark" })
     })
 
     it("defines a source cell with null value", () => {
-      g.cell("empty", null)
-      const state = g.get("empty")
-      expect(state.value).toBeNull()
-      expect(state.status).toBe("current")
+      const empty = g.cell("empty", null)
+      expect(empty()).toBeNull()
+      expect(empty.state.status).toBe("current")
     })
 
     it("throws on duplicate cell name", () => {
@@ -34,7 +32,13 @@ describe("local mode", () => {
       expect(() => g.cell("a", 2)).toThrow("cell already exists: a")
     })
 
-    it("updates via set", () => {
+    it("updates via accessor write", () => {
+      const price = g.cell("price", 100)
+      price(200)
+      expect(price()).toBe(200)
+    })
+
+    it("updates via g.set", () => {
       g.cell("price", 100)
       g.set("price", 200)
       expect(g.value("price")).toBe(200)
@@ -45,88 +49,93 @@ describe("local mode", () => {
     })
 
     it("throws when setting computed cell", () => {
-      g.cell("a", 1)
-      g.cell("b", ["a"], (a) => a * 2)
-      expect(() => g.set("b", 5)).toThrow("cannot set computed cell: b")
+      const a = g.cell("a", 1)
+      const b = g.cell("b", () => a() * 2)
+      expect(() => b(5)).toThrow("cannot set computed cell: b")
+    })
+
+    it("accessor has correct name property", () => {
+      const price = g.cell("price", 100)
+      expect(price.name).toBe("price")
     })
   })
 
   describe("computed cells (sync)", () => {
     it("computes from a single dependency", async () => {
-      g.cell("price", 100)
-      g.cell("doubled", ["price"], (p) => p * 2)
+      const price = g.cell("price", 100)
+      const doubled = g.cell("doubled", () => price() * 2)
       await tick()
-      expect(g.value("doubled")).toBe(200)
+      expect(doubled()).toBe(200)
     })
 
     it("computes from multiple dependencies", async () => {
-      g.cell("price", 100)
-      g.cell("tax", 0.08)
-      g.cell("total", ["price", "tax"], (p, t) => p * (1 + t))
+      const price = g.cell("price", 100)
+      const tax = g.cell("tax", 0.08)
+      const total = g.cell("total", () => price() * (1 + tax()))
       await tick()
-      expect(g.value("total")).toBe(108)
+      expect(total()).toBe(108)
     })
 
     it("propagates through a chain", async () => {
-      g.cell("a", 1)
-      g.cell("b", ["a"], (a) => a + 1)
-      g.cell("c", ["b"], (b) => b + 1)
+      const a = g.cell("a", 1)
+      const b = g.cell("b", () => a() + 1)
+      const c = g.cell("c", () => b() + 1)
       await tick()
-      expect(g.value("c")).toBe(3)
+      expect(c()).toBe(3)
     })
 
     it("recomputes on source change", async () => {
-      g.cell("a", 1)
-      g.cell("b", ["a"], (a) => a * 10)
+      const a = g.cell("a", 1)
+      const b = g.cell("b", () => a() * 10)
       await tick()
-      expect(g.value("b")).toBe(10)
+      expect(b()).toBe(10)
 
-      g.set("a", 5)
+      a(5)
       await tick()
-      expect(g.value("b")).toBe(50)
+      expect(b()).toBe(50)
     })
 
     it("handles diamond dependencies (computes only once)", async () => {
       let callCount = 0
-      g.cell("root", 1)
-      g.cell("left", ["root"], (r) => r + 1)
-      g.cell("right", ["root"], (r) => r + 2)
-      g.cell("bottom", ["left", "right"], (l, r) => {
+      const root = g.cell("root", 1)
+      const left = g.cell("left", () => root() + 1)
+      const right = g.cell("right", () => root() + 2)
+      const bottom = g.cell("bottom", () => {
         callCount++
-        return l + r
+        return left() + right()
       })
       await tick()
-      expect(g.value("bottom")).toBe(5)
+      expect(bottom()).toBe(5)
       expect(callCount).toBe(1)
 
       callCount = 0
-      g.set("root", 10)
+      root(10)
       await tick()
-      expect(g.value("bottom")).toBe(23)
+      expect(bottom()).toBe(23)
       expect(callCount).toBe(1)
     })
 
     it("does not propagate when value unchanged", async () => {
       let callCount = 0
-      g.cell("a", 1)
-      g.cell("b", ["a"], (a) => Math.min(a, 5))
-      g.cell("c", ["b"], (b) => {
+      const a = g.cell("a", 1)
+      const b = g.cell("b", () => Math.min(a(), 5))
+      const c = g.cell("c", () => {
         callCount++
-        return b * 2
+        return b() * 2
       })
       await tick()
       expect(callCount).toBe(1)
-      expect(g.value("c")).toBe(2)
+      expect(c()).toBe(2)
 
-      g.set("a", 3)
+      a(3)
       await tick()
-      expect(g.value("b")).toBe(3)
+      expect(b()).toBe(3)
       expect(callCount).toBe(2)
 
       callCount = 0
-      g.set("a", 4)
+      a(4)
       await tick()
-      g.set("a", 4)
+      a(4)
       await tick()
       expect(callCount).toBe(1)
     })
@@ -134,20 +143,40 @@ describe("local mode", () => {
 
   describe("computed cells (async)", () => {
     it("resolves async computations", async () => {
-      g.cell("input", "hello")
-      g.cell("upper", ["input"], async (val) => {
+      const input = g.cell("input", "hello")
+      const upper = g.cell("upper", async () => {
         await delay(10)
-        return val.toUpperCase()
+        return input().toUpperCase()
       })
       await tick()
       await delay(50)
-      expect(g.value("upper")).toBe("HELLO")
+      expect(upper()).toBe("HELLO")
+    })
+
+    it("tracks dependencies across await boundaries", async () => {
+      const a = g.cell("a", 10)
+      const b = g.cell("b", 20)
+      const result = g.cell("result", async () => {
+        const aVal = a()
+        await delay(10)
+        const bVal = b()
+        return aVal + bVal
+      })
+      await tick()
+      await delay(50)
+      expect(result()).toBe(30)
+
+      b(100)
+      await tick()
+      await delay(50)
+      expect(result()).toBe(110)
     })
 
     it("discards stale async results", async () => {
       let resolvers = []
-      g.cell("input", 1)
-      g.cell("slow", ["input"], (val) => {
+      const input = g.cell("input", 1)
+      const slow = g.cell("slow", () => {
+        const val = input()
         return new Promise((resolve) => {
           resolvers.push(() => resolve(val * 10))
         })
@@ -155,198 +184,266 @@ describe("local mode", () => {
 
       await tick()
       expect(resolvers).toHaveLength(1)
-      expect(g.get("slow").status).toBe("pending")
+      expect(slow.state.status).toBe("pending")
 
-      g.set("input", 2)
+      input(2)
       await tick()
 
       resolvers[0]()
       await tick()
-      expect(g.value("slow")).not.toBe(10)
+      expect(slow()).not.toBe(10)
 
       resolvers[1]()
       await tick()
       await delay(10)
-      expect(g.value("slow")).toBe(20)
+      expect(slow()).toBe(20)
+    })
+  })
+
+  describe("auto-tracking", () => {
+    it("discovers dependencies automatically", async () => {
+      const a = g.cell("a", 1)
+      const b = g.cell("b", 2)
+      g.cell("sum", () => a() + b())
+      await tick()
+
+      const info = g.cells().find(c => c.name === "sum")
+      expect(info.deps).toContain("a")
+      expect(info.deps).toContain("b")
+    })
+
+    it("handles conditional dependencies", async () => {
+      const flag = g.cell("flag", true)
+      const a = g.cell("a", 10)
+      const b = g.cell("b", 20)
+      const result = g.cell("result", () => flag() ? a() : b())
+      await tick()
+      expect(result()).toBe(10)
+
+      flag(false)
+      await tick()
+      expect(result()).toBe(20)
+
+      a(999)
+      await tick()
+      expect(result()).toBe(20)
+    })
+
+    it("re-tracks deps on each computation", async () => {
+      const flag = g.cell("flag", true)
+      const a = g.cell("a", 10)
+      const b = g.cell("b", 20)
+      const result = g.cell("result", () => flag() ? a() : b())
+      await tick()
+
+      let info = g.cells().find(c => c.name === "result")
+      expect(info.deps).toContain("flag")
+      expect(info.deps).toContain("a")
+      expect(info.deps).not.toContain("b")
+
+      flag(false)
+      await tick()
+
+      info = g.cells().find(c => c.name === "result")
+      expect(info.deps).toContain("flag")
+      expect(info.deps).toContain("b")
+      expect(info.deps).not.toContain("a")
+    })
+
+    it("tracks deps across await in async cells", async () => {
+      const a = g.cell("a", 1)
+      const b = g.cell("b", 2)
+      const result = g.cell("result", async () => {
+        const x = a()
+        await delay(5)
+        const y = b()
+        return x + y
+      })
+      await tick()
+      await delay(50)
+      expect(result()).toBe(3)
+
+      const info = g.cells().find(c => c.name === "result")
+      expect(info.deps).toContain("a")
+      expect(info.deps).toContain("b")
+    })
+
+    it("isolates tracking between concurrent async cells", async () => {
+      const a = g.cell("a", 1)
+      const b = g.cell("b", 2)
+      const c = g.cell("c", 3)
+
+      const x = g.cell("x", async () => {
+        await delay(10)
+        return a() + b()
+      })
+      const y = g.cell("y", async () => {
+        await delay(10)
+        return b() + c()
+      })
+
+      await tick()
+      await delay(50)
+
+      const xInfo = g.cells().find(ci => ci.name === "x")
+      const yInfo = g.cells().find(ci => ci.name === "y")
+      expect(xInfo.deps).toContain("a")
+      expect(xInfo.deps).toContain("b")
+      expect(xInfo.deps).not.toContain("c")
+      expect(yInfo.deps).toContain("b")
+      expect(yInfo.deps).toContain("c")
+      expect(yInfo.deps).not.toContain("a")
     })
   })
 
   describe("error handling", () => {
     it("captures errors in computed cells", async () => {
-      g.cell("a", 1)
-      g.cell("b", ["a"], () => {
+      const a = g.cell("a", 1)
+      const b = g.cell("b", () => {
+        a()
         throw new Error("boom")
       })
       await tick()
-      const state = g.get("b")
-      expect(state.status).toBe("error")
-      expect(state.error.message).toBe("boom")
+      expect(b.state.status).toBe("error")
+      expect(b.state.error.message).toBe("boom")
     })
 
     it("retains last good value on error", async () => {
       let shouldFail = false
-      g.cell("a", 1)
-      g.cell("b", ["a"], (a) => {
+      const a = g.cell("a", 1)
+      const b = g.cell("b", () => {
+        const v = a()
         if (shouldFail) throw new Error("fail")
-        return a * 2
+        return v * 2
       })
       await tick()
-      expect(g.value("b")).toBe(2)
+      expect(b()).toBe(2)
 
       shouldFail = true
-      g.set("a", 5)
+      a(5)
       await tick()
-      expect(g.get("b").status).toBe("error")
-      expect(g.get("b").value).toBe(2)
+      expect(b.state.status).toBe("error")
+      expect(b.state.value).toBe(2)
     })
 
     it("marks downstream cells as stale on error", async () => {
-      g.cell("a", 1)
-      g.cell("b", ["a"], (a) => a * 2)
-      g.cell("c", ["b"], (b) => b + 1)
-      await delay(10)
-      expect(g.value("c")).toBe(3)
-
-      g.cell.__test_failB = true
-      g.remove("c")
-      g.remove("b")
-      g.cell("b", ["a"], (a) => { throw new Error("fail") })
-      g.cell("c", ["b"], (b) => b + 1)
-      await delay(10)
-      expect(g.get("b").status).toBe("error")
-      expect(g.get("c").status).toBe("uninitialized")
-    })
-
-    it("marks previously-computed downstream as stale when dep errors", async () => {
       let shouldFail = false
-      g.cell("a", 1)
-      g.cell("b", ["a"], (a) => {
+      const a = g.cell("a", 1)
+      const b = g.cell("b", () => {
+        const v = a()
         if (shouldFail) throw new Error("fail")
-        return a * 2
+        return v * 2
       })
-      g.cell("c", ["b"], (b) => b + 1)
+      const c = g.cell("c", () => b() + 1)
       await delay(10)
-      expect(g.value("c")).toBe(3)
+      expect(c()).toBe(3)
 
       shouldFail = true
-      g.set("a", 5)
+      a(5)
       await delay(10)
-      expect(g.get("b").status).toBe("error")
-      expect(g.get("c").status).toBe("stale")
-      expect(g.get("c").value).toBe(3)
-    })
-
-    it("does not recompute downstream when dep is in error", async () => {
-      let cCount = 0
-      g.cell("a", 1)
-      g.cell("b", ["a"], (a) => a * 2)
-      g.cell("c", ["b"], (b) => {
-        cCount++
-        return b + 1
-      })
-      await tick()
-      expect(cCount).toBe(1)
-
-      cCount = 0
-      g.cell("b2", ["a"], () => { throw new Error("fail") })
-      g.cell("d", ["b2"], (b) => b + 1)
-      await tick()
-      expect(g.get("d").status).not.toBe("current")
+      expect(b.state.status).toBe("error")
+      expect(c.state.status).toBe("stale")
+      expect(c.state.value).toBe(3)
     })
 
     it("recovers when error clears", async () => {
       let shouldFail = true
-      g.cell("a", 1)
-      g.cell("b", ["a"], (a) => {
+      const a = g.cell("a", 1)
+      const b = g.cell("b", () => {
+        const v = a()
         if (shouldFail) throw new Error("fail")
-        return a * 2
+        return v * 2
       })
-      g.cell("c", ["b"], (b) => b + 10)
+      const c = g.cell("c", () => b() + 10)
       await tick()
-      expect(g.get("b").status).toBe("error")
+      expect(b.state.status).toBe("error")
 
       shouldFail = false
-      g.set("a", 5)
+      a(5)
       await tick()
-      expect(g.get("b").status).toBe("current")
-      expect(g.value("b")).toBe(10)
-      expect(g.value("c")).toBe(20)
+      expect(b.state.status).toBe("current")
+      expect(b()).toBe(10)
+      expect(c()).toBe(20)
     })
 
     it("recovers downstream even when value is unchanged", async () => {
       let shouldFail = false
-      g.cell("a", 1)
-      g.cell("b", ["a"], (a) => {
+      const a = g.cell("a", 1)
+      const b = g.cell("b", () => {
+        a()
         if (shouldFail) throw new Error("fail")
         return 42
       })
-      g.cell("c", ["b"], (b) => b + 1)
+      const c = g.cell("c", () => b() + 1)
       await tick()
-      expect(g.value("b")).toBe(42)
-      expect(g.value("c")).toBe(43)
+      expect(b()).toBe(42)
+      expect(c()).toBe(43)
 
       shouldFail = true
-      g.set("a", 2)
+      a(2)
       await tick()
-      expect(g.get("b").status).toBe("error")
-      expect(g.get("c").status).toBe("stale")
+      expect(b.state.status).toBe("error")
+      expect(c.state.status).toBe("stale")
 
       shouldFail = false
-      g.set("a", 3)
+      a(3)
       await tick()
-      expect(g.get("b").status).toBe("current")
-      expect(g.value("b")).toBe(42)
-      expect(g.get("c").status).toBe("current")
-      expect(g.value("c")).toBe(43)
+      expect(b.state.status).toBe("current")
+      expect(b()).toBe(42)
+      expect(c.state.status).toBe("current")
+      expect(c()).toBe(43)
     })
 
     it("fires onError listeners", async () => {
       const errors = []
-      g.cell("a", 1)
-      g.cell("b", ["a"], () => { throw new Error("oops") })
-      g.onError("b", (err) => errors.push(err.message))
+      const a = g.cell("a", 1)
+      const b = g.cell("b", () => {
+        a()
+        throw new Error("oops")
+      })
+      b.onError((err) => errors.push(err.message))
       await delay(20)
       expect(errors).toEqual(["oops"])
     })
   })
 
   describe("listeners", () => {
-    it("fires on value change", async () => {
+    it("fires on value change via accessor.on", async () => {
       const values = []
-      g.cell("a", 1)
-      g.cell("b", ["a"], (a) => a * 2)
-      g.on("b", (val) => values.push(val))
+      const a = g.cell("a", 1)
+      const b = g.cell("b", () => a() * 2)
+      b.on((val) => values.push(val))
       await tick()
       expect(values).toEqual([2])
 
-      g.set("a", 5)
+      a(5)
       await tick()
       expect(values).toEqual([2, 10])
     })
 
     it("unsubscribes correctly", async () => {
       const values = []
-      g.cell("a", 1)
-      g.cell("b", ["a"], (a) => a * 2)
-      const off = g.on("b", (val) => values.push(val))
+      const a = g.cell("a", 1)
+      const b = g.cell("b", () => a() * 2)
+      const off = b.on((val) => values.push(val))
       await tick()
       expect(values).toEqual([2])
 
       off()
-      g.set("a", 5)
+      a(5)
       await tick()
       expect(values).toEqual([2])
     })
 
     it("fires wildcard listener on any change", async () => {
       const changes = []
-      g.cell("a", 1)
-      g.cell("b", ["a"], (a) => a * 2)
-      g.on("*", (name, val) => changes.push({ name, val }))
+      const a = g.cell("a", 1)
+      const b = g.cell("b", () => a() * 2)
+      g.on((name, val) => changes.push({ name, val }))
       await tick()
       expect(changes).toEqual([{ name: "b", val: 2 }])
 
-      g.set("a", 5)
+      a(5)
       await tick()
       expect(changes).toContainEqual({ name: "a", val: 5 })
       expect(changes).toContainEqual({ name: "b", val: 10 })
@@ -354,9 +451,9 @@ describe("local mode", () => {
 
     it("provides state as second argument", async () => {
       let receivedState = null
-      g.cell("a", 1)
-      g.cell("b", ["a"], (a) => a * 2)
-      g.on("b", (val, state) => { receivedState = state })
+      const a = g.cell("a", 1)
+      const b = g.cell("b", () => a() * 2)
+      b.on((val, state) => { receivedState = state })
       await tick()
       expect(receivedState.value).toBe(2)
       expect(receivedState.status).toBe("current")
@@ -364,34 +461,45 @@ describe("local mode", () => {
     })
 
     it("listener errors don't break propagation", async () => {
-      g.cell("a", 1)
-      g.cell("b", ["a"], (a) => a * 2)
-      g.cell("c", ["b"], (b) => b + 1)
-      g.on("b", () => { throw new Error("listener fail") })
+      const a = g.cell("a", 1)
+      const b = g.cell("b", () => a() * 2)
+      const c = g.cell("c", () => b() + 1)
+      b.on(() => { throw new Error("listener fail") })
       const cValues = []
-      g.on("c", (val) => cValues.push(val))
+      c.on((val) => cValues.push(val))
       await tick()
       expect(cValues).toEqual([3])
+    })
+
+    it("fires source cell listeners on set", () => {
+      const values = []
+      const a = g.cell("a", 1)
+      a.on((val) => values.push(val))
+      a(5)
+      expect(values).toEqual([5])
     })
   })
 
   describe("snapshot", () => {
     it("returns all current values", async () => {
-      g.cell("a", 1)
-      g.cell("b", 2)
-      g.cell("c", ["a", "b"], (a, b) => a + b)
+      const a = g.cell("a", 1)
+      const b = g.cell("b", 2)
+      const c = g.cell("c", () => a() + b())
       await tick()
       expect(g.snapshot()).toEqual({ a: 1, b: 2, c: 3 })
     })
 
     it("omits uninitialized cells", () => {
-      g.cell("computed", ["missing"], (v) => v)
+      g.cell("computed", () => {
+        const missing = g.value("missing")
+        return missing
+      })
       expect(g.snapshot()).toEqual({})
     })
 
     it("omits errored cells", async () => {
-      g.cell("a", 1)
-      g.cell("b", ["a"], () => { throw new Error("fail") })
+      const a = g.cell("a", 1)
+      g.cell("b", () => { a(); throw new Error("fail") })
       await tick()
       const snap = g.snapshot()
       expect(snap).toEqual({ a: 1 })
@@ -399,148 +507,157 @@ describe("local mode", () => {
   })
 
   describe("cycle detection", () => {
-    it("detects direct self-reference", () => {
-      expect(() => g.cell("a", ["a"], (a) => a)).toThrow("cycle detected")
+    it("detects self-reference and enters error state", async () => {
+      const a = g.cell("a", 1)
+      let self
+      self = g.cell("self", () => {
+        a()
+        self()
+        return 1
+      })
+      await tick()
+      expect(self.state.status).toBe("error")
+      expect(self.state.error.message).toContain("cycle detected")
     })
 
-    it("detects indirect cycle", () => {
-      g.cell("a", 1)
-      g.cell("b", ["a"], (a) => a)
-      expect(() => g.cell("a2", ["b"], (b) => b)).not.toThrow()
-      expect(() => {
-        g.cell("x", ["y"], (y) => y)
-        g.cell("y", ["x"], (x) => x)
-      }).toThrow("cycle detected")
+    it("detects indirect cycle", async () => {
+      const a = g.cell("a", 1)
+      const b = g.cell("b", () => a())
+      expect(() => g.cell("a2", () => b())).not.toThrow()
     })
 
-    it("cleans up cell on cycle detection", () => {
-      g.cell("x", ["y"], (y) => y)
-      try {
-        g.cell("y", ["x"], (x) => x)
-      } catch {}
-      expect(g.cells().find(c => c.name === "y")).toBeUndefined()
-      expect(g.cells().find(c => c.name === "x")).toBeDefined()
+    it("cell enters error state on cycle detection", async () => {
+      const x = g.cell("x", 1)
+      const y = g.cell("y", () => x())
+      let bad
+      bad = g.cell("bad", () => {
+        y()
+        bad()
+        return 1
+      })
+      await tick()
+      expect(bad.state.status).toBe("error")
+      expect(bad.state.error.message).toContain("cycle detected")
     })
   })
 
   describe("late dependency resolution", () => {
-    it("computes when deps become available", async () => {
-      g.cell("total", ["price", "tax"], (p, t) => p * (1 + t))
-      expect(g.get("total").status).toBe("uninitialized")
-
-      g.cell("price", 100)
-      expect(g.get("total").status).toBe("uninitialized")
-
-      g.cell("tax", 0.08)
+    it("handles multi-level late resolution", async () => {
+      const a = g.cell("a", 5)
+      const b = g.cell("b", () => a() * 2)
+      const c = g.cell("c", () => b() + 1)
       await tick()
-      expect(g.value("total")).toBe(108)
+      expect(b()).toBe(10)
+      expect(c()).toBe(11)
     })
 
-    it("handles multi-level late resolution", async () => {
-      g.cell("c", ["b"], (b) => b + 1)
-      g.cell("b", ["a"], (a) => a * 2)
-      g.cell("a", 5)
+    it("computed cell defined before source deps resolves on set", async () => {
+      const doubled = g.cell("doubled", () => {
+        const v = g.value("input")
+        return v === undefined ? undefined : v * 2
+      })
       await tick()
-      expect(g.value("b")).toBe(10)
-      expect(g.value("c")).toBe(11)
+      expect(doubled()).toBeUndefined()
+
+      g.cell("input", 0)
+      g.set("input", 5)
+      await tick()
+      expect(doubled()).toBe(10)
     })
   })
 
   describe("equality check", () => {
     it("uses === for primitives", async () => {
       let count = 0
-      g.cell("a", 1)
-      g.cell("b", ["a"], (a) => {
+      const a = g.cell("a", 1)
+      const b = g.cell("b", () => {
         count++
-        return a + 1
+        return a() + 1
       })
       await tick()
       expect(count).toBe(1)
 
-      g.set("a", 1)
+      a(1)
       await tick()
       expect(count).toBe(1)
     })
 
     it("uses JSON comparison for objects", async () => {
       let count = 0
-      g.cell("a", { x: 1 })
-      g.cell("b", ["a"], (a) => {
+      const a = g.cell("a", { x: 1 })
+      const b = g.cell("b", () => {
         count++
-        return a
+        return a()
       })
       await tick()
       expect(count).toBe(1)
 
-      g.set("a", { x: 1 })
+      a({ x: 1 })
       await tick()
       expect(count).toBe(1)
     })
 
     it("supports custom equals function", async () => {
       let count = 0
-      g.cell("a", { id: 1, ts: 100 })
-      g.cell("b", ["a"], (a) => a, {
+      const a = g.cell("a", { id: 1, ts: 100 })
+      const b = g.cell("b", () => a(), {
         equals: (prev, next) => prev?.id === next?.id,
       })
-      g.cell("c", ["b"], () => {
+      const c = g.cell("c", () => {
         count++
+        b()
         return "ok"
       })
       await tick()
       expect(count).toBe(1)
 
-      g.set("a", { id: 1, ts: 200 })
+      a({ id: 1, ts: 200 })
       await tick()
       expect(count).toBe(1)
 
-      g.set("a", { id: 2, ts: 300 })
+      a({ id: 2, ts: 300 })
       await tick()
       expect(count).toBe(2)
     })
   })
 
   describe("polling", () => {
-    it("polls a source cell", async () => {
+    it("polls a source cell via accessor.poll", async () => {
       vi.useFakeTimers()
       let counter = 0
-      g.cell("counter", 0)
-      g.poll("counter", () => ++counter, 100)
+      const c = g.cell("counter", 0)
+      c.poll(() => ++counter, 100)
 
       await vi.advanceTimersByTimeAsync(50)
-      expect(g.value("counter")).toBe(1)
+      expect(c()).toBe(1)
 
       await vi.advanceTimersByTimeAsync(100)
-      expect(g.value("counter")).toBe(2)
+      expect(c()).toBe(2)
 
       await vi.advanceTimersByTimeAsync(100)
-      expect(g.value("counter")).toBe(3)
+      expect(c()).toBe(3)
 
       vi.useRealTimers()
     })
 
     it("throws when polling a computed cell", () => {
-      g.cell("a", 1)
-      g.cell("b", ["a"], (a) => a)
-      expect(() => g.poll("b", () => 1, 100)).toThrow("cannot poll computed cell")
+      const a = g.cell("a", 1)
+      const b = g.cell("b", () => a())
+      expect(() => b.poll(() => 1, 100)).toThrow("cannot poll computed cell")
     })
 
-    it("throws when polling nonexistent cell", () => {
-      expect(() => g.poll("nope", () => 1, 100)).toThrow("cell not found")
-    })
-
-    it("stops polling", async () => {
+    it("stops polling via accessor.stop", async () => {
       vi.useFakeTimers()
       let counter = 0
-      g.cell("counter", 0)
-      g.poll("counter", () => ++counter, 100)
+      const c = g.cell("counter", 0)
+      c.poll(() => ++counter, 100)
 
       await vi.advanceTimersByTimeAsync(50)
-      expect(g.value("counter")).toBe(1)
+      expect(c()).toBe(1)
 
-      g.stop("counter")
+      c.stop()
       await vi.advanceTimersByTimeAsync(200)
-      expect(g.value("counter")).toBe(1)
+      expect(c()).toBe(1)
 
       vi.useRealTimers()
     })
@@ -549,21 +666,21 @@ describe("local mode", () => {
       vi.useFakeTimers()
       let shouldFail = true
       const errors = []
-      g.cell("flaky", 0)
-      g.onError("flaky", (err) => errors.push(err.message))
-      g.poll("flaky", () => {
+      const flaky = g.cell("flaky", 0)
+      flaky.onError((err) => errors.push(err.message))
+      flaky.poll(() => {
         if (shouldFail) throw new Error("poll fail")
         return 42
       }, 100)
 
       await vi.advanceTimersByTimeAsync(50)
-      expect(g.get("flaky").status).toBe("error")
+      expect(flaky.state.status).toBe("error")
       expect(errors).toEqual(["poll fail"])
 
       shouldFail = false
       await vi.advanceTimersByTimeAsync(100)
-      expect(g.value("flaky")).toBe(42)
-      expect(g.get("flaky").status).toBe("current")
+      expect(flaky()).toBe(42)
+      expect(flaky.state.status).toBe("current")
 
       vi.useRealTimers()
     })
@@ -571,65 +688,66 @@ describe("local mode", () => {
 
   describe("debouncing", () => {
     it("initial compute is not debounced", async () => {
-      g.cell("a", 1)
-      g.cell("debounced", ["a"], (a) => a * 2, { debounce: 5000 })
+      const a = g.cell("a", 1)
+      const debounced = g.cell("debounced", () => a() * 2, { debounce: 5000 })
       await tick()
-      expect(g.value("debounced")).toBe(2)
+      expect(debounced()).toBe(2)
     })
 
     it("debounces computed cell recomputation", async () => {
       vi.useFakeTimers()
       let count = 0
-      g.cell("a", 1)
-      g.cell("debounced", ["a"], (a) => {
+      const a = g.cell("a", 1)
+      const debounced = g.cell("debounced", () => {
         count++
-        return a * 2
+        return a() * 2
       }, { debounce: 200 })
 
       await vi.advanceTimersByTimeAsync(0)
       expect(count).toBe(1)
       count = 0
 
-      g.set("a", 2)
-      g.set("a", 3)
-      g.set("a", 4)
+      a(2)
+      a(3)
+      a(4)
 
       await vi.advanceTimersByTimeAsync(100)
       expect(count).toBe(0)
 
       await vi.advanceTimersByTimeAsync(200)
       expect(count).toBe(1)
-      expect(g.value("debounced")).toBe(8)
+      expect(debounced()).toBe(8)
 
       vi.useRealTimers()
     })
   })
 
   describe("removal", () => {
-    it("removes a leaf cell", async () => {
-      g.cell("a", 1)
-      g.cell("b", ["a"], (a) => a * 2)
+    it("removes a leaf cell via accessor.remove", async () => {
+      const a = g.cell("a", 1)
+      const b = g.cell("b", () => a() * 2)
       await tick()
 
-      g.remove("b")
+      b.remove()
       expect(g.get("b")).toBeNull()
       expect(g.cells()).toHaveLength(1)
     })
 
-    it("throws when removing cell with dependents", () => {
-      g.cell("a", 1)
-      g.cell("b", ["a"], (a) => a)
-      expect(() => g.remove("a")).toThrow('cannot remove "a": "b" depends on it')
+    it("throws when removing cell with dependents", async () => {
+      const a = g.cell("a", 1)
+      g.cell("b", () => a())
+      await tick()
+      expect(() => a.remove()).toThrow('cannot remove "a": "b" depends on it')
     })
 
     it("removeTree removes cell and all dependents", async () => {
-      g.cell("a", 1)
-      g.cell("b", ["a"], (a) => a + 1)
-      g.cell("c", ["b"], (b) => b + 1)
+      const a = g.cell("a", 1)
+      const b = g.cell("b", () => a() + 1)
+      const c = g.cell("c", () => b() + 1)
       g.cell("d", 99)
       await tick()
 
-      g.removeTree("a")
+      a.removeTree()
       expect(g.cells()).toHaveLength(1)
       expect(g.cells()[0].name).toBe("d")
     })
@@ -637,24 +755,25 @@ describe("local mode", () => {
 
   describe("graph introspection", () => {
     it("returns correct topology", async () => {
-      g.cell("a", 1)
-      g.cell("b", 2)
-      g.cell("c", ["a", "b"], (a, b) => a + b)
+      const a = g.cell("a", 1)
+      const b = g.cell("b", 2)
+      const c = g.cell("c", () => a() + b())
       await tick()
 
       const info = g.cells()
       expect(info).toHaveLength(3)
 
-      const a = info.find(c => c.name === "a")
-      expect(a.type).toBe("source")
-      expect(a.deps).toEqual([])
-      expect(a.dependents).toEqual(["c"])
+      const aInfo = info.find(c => c.name === "a")
+      expect(aInfo.type).toBe("source")
+      expect(aInfo.deps).toEqual([])
+      expect(aInfo.dependents).toEqual(["c"])
 
-      const c = info.find(c => c.name === "c")
-      expect(c.type).toBe("computed")
-      expect(c.deps).toEqual(["a", "b"])
-      expect(c.dependents).toEqual([])
-      expect(c.status).toBe("current")
+      const cInfo = info.find(c => c.name === "c")
+      expect(cInfo.type).toBe("computed")
+      expect(cInfo.deps).toContain("a")
+      expect(cInfo.deps).toContain("b")
+      expect(cInfo.dependents).toEqual([])
+      expect(cInfo.status).toBe("current")
     })
   })
 
@@ -668,12 +787,161 @@ describe("local mode", () => {
 
     it("clears all state", async () => {
       vi.useFakeTimers()
-      g.cell("a", 1)
-      g.cell("b", ["a"], (a) => a * 2)
-      g.poll("a", () => 99, 100)
+      const a = g.cell("a", 1)
+      g.cell("b", () => a() * 2)
+      a.poll(() => 99, 100)
       await g.destroy()
       expect(g.cells()).toHaveLength(0)
       vi.useRealTimers()
+    })
+  })
+
+  describe("g.set and g.value escape hatches", () => {
+    it("g.set works for cross-module access", () => {
+      const a = g.cell("a", 1)
+      g.set("a", 42)
+      expect(a()).toBe(42)
+    })
+
+    it("g.value reads by name", () => {
+      g.cell("a", 100)
+      expect(g.value("a")).toBe(100)
+    })
+
+    it("g.get reads full state by name", () => {
+      g.cell("a", 100)
+      const state = g.get("a")
+      expect(state.value).toBe(100)
+      expect(state.status).toBe("current")
+    })
+
+    it("g.value participates in dependency tracking", async () => {
+      const a = g.cell("a", 10)
+      const b = g.cell("b", () => g.value("a") * 2)
+      await tick()
+      expect(b()).toBe(20)
+
+      a(5)
+      await tick()
+      expect(b()).toBe(10)
+
+      const info = g.cells().find(c => c.name === "b")
+      expect(info.deps).toContain("a")
+    })
+  })
+
+  describe("async error handling", () => {
+    it("captures errors in async computed cells", async () => {
+      const a = g.cell("a", 1)
+      const b = g.cell("b", async () => {
+        a()
+        await delay(5)
+        throw new Error("async boom")
+      })
+      await tick()
+      await delay(50)
+      expect(b.state.status).toBe("error")
+      expect(b.state.error.message).toBe("async boom")
+    })
+
+    it("retains last good value after async error", async () => {
+      let shouldFail = false
+      const a = g.cell("a", 1)
+      const b = g.cell("b", async () => {
+        const v = a()
+        await delay(5)
+        if (shouldFail) throw new Error("fail")
+        return v * 2
+      })
+      await tick()
+      await delay(50)
+      expect(b()).toBe(2)
+
+      shouldFail = true
+      a(5)
+      await tick()
+      await delay(50)
+      expect(b.state.status).toBe("error")
+      expect(b.state.value).toBe(2)
+    })
+
+    it("recovers from async error on next successful compute", async () => {
+      let shouldFail = true
+      const a = g.cell("a", 1)
+      const b = g.cell("b", async () => {
+        const v = a()
+        await delay(5)
+        if (shouldFail) throw new Error("fail")
+        return v * 2
+      })
+      await tick()
+      await delay(50)
+      expect(b.state.status).toBe("error")
+
+      shouldFail = false
+      a(5)
+      await tick()
+      await delay(50)
+      expect(b.state.status).toBe("current")
+      expect(b()).toBe(10)
+    })
+  })
+
+  describe("indirect cycle detection", () => {
+    it("detects A -> B -> A cycle", async () => {
+      let cellA, cellB
+      cellA = g.cell("a", () => {
+        cellB()
+        return 1
+      })
+      cellB = g.cell("b", () => {
+        cellA()
+        return 2
+      })
+      await tick()
+
+      const aState = cellA.state
+      const bState = cellB.state
+      const hasError = aState.status === "error" || bState.status === "error"
+      expect(hasError).toBe(true)
+    })
+
+    it("detects longer cycle chains", async () => {
+      let cellC
+      const a = g.cell("a", 1)
+      const b = g.cell("b", () => a() + (cellC ? cellC() : 0))
+      cellC = g.cell("c", () => b() + 1)
+      await tick()
+
+      expect(b.state.status === "error" || cellC.state.status === "error").toBe(true)
+    })
+  })
+
+  describe("sync fn returning promise", () => {
+    it("handles non-async fn that returns a promise", async () => {
+      const a = g.cell("a", 5)
+      const b = g.cell("b", () => {
+        const v = a()
+        return Promise.resolve(v * 3)
+      })
+      await tick()
+      await delay(20)
+      expect(b()).toBe(15)
+    })
+
+    it("propagates after promise resolves", async () => {
+      const a = g.cell("a", 2)
+      const b = g.cell("b", () => {
+        return Promise.resolve(a() * 10)
+      })
+      await tick()
+      await delay(20)
+      expect(b()).toBe(20)
+
+      a(5)
+      await tick()
+      await delay(20)
+      expect(b()).toBe(50)
     })
   })
 })

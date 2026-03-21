@@ -37,13 +37,13 @@ describe("distributed mode", () => {
       const gA = await makeGraph()
       const gB = await makeGraph()
 
-      gA.cell("price", 0)
+      const priceA = gA.cell("price", 0)
       gB.cell("price", 0)
 
       await gA.ready()
       await gB.ready()
 
-      gA.set("price", 100)
+      priceA(100)
       await delay(100)
 
       expect(gB.value("price")).toBe(100)
@@ -53,15 +53,15 @@ describe("distributed mode", () => {
       const gA = await makeGraph()
       const gB = await makeGraph()
 
-      gA.cell("counter", 0)
+      const counter = gA.cell("counter", 0)
       gB.cell("counter", 0)
 
       await gA.ready()
       await gB.ready()
 
-      gA.set("counter", 1)
-      gA.set("counter", 2)
-      gA.set("counter", 3)
+      counter(1)
+      counter(2)
+      counter(3)
 
       await delay(200)
 
@@ -70,9 +70,9 @@ describe("distributed mode", () => {
 
     it("restores values from Redis on ready", async () => {
       const gA = await makeGraph()
-      gA.cell("data", null)
+      const dataA = gA.cell("data", null)
       await gA.ready()
-      gA.set("data", { hello: "world" })
+      dataA({ hello: "world" })
       await delay(50)
       await gA.destroy()
 
@@ -92,16 +92,16 @@ describe("distributed mode", () => {
       const gA = await makeGraph()
       const gB = await makeGraph()
 
-      gA.cell("input", 0)
-      gA.cell("derived", ["input"], (v) => {
+      const inputA = gA.cell("input", 0)
+      gA.cell("derived", () => {
         computeCountA++
-        return v * 10
+        return gA.value("input") * 10
       })
 
       gB.cell("input", 0)
-      gB.cell("derived", ["input"], (v) => {
+      gB.cell("derived", () => {
         computeCountB++
-        return v * 10
+        return gB.value("input") * 10
       })
 
       await gA.ready()
@@ -111,16 +111,14 @@ describe("distributed mode", () => {
       computeCountA = 0
       computeCountB = 0
 
-      gA.set("input", 5)
+      inputA(5)
       await delay(300)
 
       const totalComputes = computeCountA + computeCountB
       expect(totalComputes).toBe(1)
 
-      const derivedA = gA.value("derived")
-      const derivedB = gB.value("derived")
-      expect(derivedA).toBe(50)
-      expect(derivedB).toBe(50)
+      expect(gA.value("derived")).toBe(50)
+      expect(gB.value("derived")).toBe(50)
     })
 
     it("async computation runs on exactly one instance", async () => {
@@ -130,16 +128,18 @@ describe("distributed mode", () => {
       const gA = await makeGraph()
       const gB = await makeGraph()
 
-      gA.cell("input", 0)
-      gA.cell("expensive", ["input"], async (v) => {
+      const inputA = gA.cell("input", 0)
+      gA.cell("expensive", async () => {
         computeCountA++
+        const v = gA.value("input")
         await delay(50)
         return `result:${v}`
       })
 
       gB.cell("input", 0)
-      gB.cell("expensive", ["input"], async (v) => {
+      gB.cell("expensive", async () => {
         computeCountB++
+        const v = gB.value("input")
         await delay(50)
         return `result:${v}`
       })
@@ -151,7 +151,7 @@ describe("distributed mode", () => {
       computeCountA = 0
       computeCountB = 0
 
-      gA.set("input", 42)
+      inputA(42)
       await delay(500)
 
       expect(computeCountA + computeCountB).toBe(1)
@@ -161,23 +161,23 @@ describe("distributed mode", () => {
   })
 
   describe("listeners fire on all instances", () => {
-    it("g.on fires on both instances when value changes", async () => {
+    it("accessor.on fires on both instances when value changes", async () => {
       const valuesA = []
       const valuesB = []
 
       const gA = await makeGraph()
       const gB = await makeGraph()
 
-      gA.cell("score", 0)
-      gB.cell("score", 0)
+      const scoreA = gA.cell("score", 0)
+      const scoreB = gB.cell("score", 0)
 
-      gA.on("score", (v) => valuesA.push(v))
-      gB.on("score", (v) => valuesB.push(v))
+      scoreA.on((v) => valuesA.push(v))
+      scoreB.on((v) => valuesB.push(v))
 
       await gA.ready()
       await gB.ready()
 
-      gA.set("score", 100)
+      scoreA(100)
       await delay(200)
 
       expect(valuesA).toContain(100)
@@ -190,19 +190,19 @@ describe("distributed mode", () => {
       const gA = await makeGraph()
       const gB = await makeGraph()
 
-      gA.cell("x", 0)
-      gA.cell("doubled", ["x"], (x) => x * 2)
+      const xA = gA.cell("x", 0)
+      gA.cell("doubled", () => gA.value("x") * 2)
 
       gB.cell("x", 0)
-      gB.cell("doubled", ["x"], (x) => x * 2)
+      const doubledB = gB.cell("doubled", () => gB.value("x") * 2)
 
-      gB.on("doubled", (v) => resultsB.push(v))
+      doubledB.on((v) => resultsB.push(v))
 
       await gA.ready()
       await gB.ready()
       await delay(50)
 
-      gA.set("x", 7)
+      xA(7)
       await delay(300)
 
       expect(resultsB).toContain(14)
@@ -218,14 +218,14 @@ describe("distributed mode", () => {
       const gA = await makeGraph()
       const gB = await makeGraph()
 
-      gA.cell("polled", 0)
-      gB.cell("polled", 0)
+      const polledA = gA.cell("polled", 0)
+      const polledB = gB.cell("polled", 0)
 
       await gA.ready()
       await gB.ready()
 
-      gA.poll("polled", () => { pollCountA++; return ++pollValue }, 200)
-      gB.poll("polled", () => { pollCountB++; return ++pollValue }, 200)
+      polledA.poll(() => { pollCountA++; return ++pollValue }, 200)
+      polledB.poll(() => { pollCountB++; return ++pollValue }, 200)
 
       await delay(250)
 
@@ -233,8 +233,8 @@ describe("distributed mode", () => {
       expect(totalPolls).toBeGreaterThanOrEqual(1)
       expect(totalPolls).toBeLessThanOrEqual(2)
 
-      gA.stop("polled")
-      gB.stop("polled")
+      polledA.stop()
+      polledB.stop()
     })
   })
 
@@ -243,19 +243,19 @@ describe("distributed mode", () => {
       const gA = await makeGraph()
       const gB = await makeGraph()
 
-      gA.cell("base", 1)
-      gA.cell("step1", ["base"], (b) => b + 10)
-      gA.cell("step2", ["step1"], (s) => s * 2)
+      const baseA = gA.cell("base", 1)
+      gA.cell("step1", () => gA.value("base") + 10)
+      gA.cell("step2", () => gA.value("step1") * 2)
 
       gB.cell("base", 1)
-      gB.cell("step1", ["base"], (b) => b + 10)
-      gB.cell("step2", ["step1"], (s) => s * 2)
+      gB.cell("step1", () => gB.value("base") + 10)
+      gB.cell("step2", () => gB.value("step1") * 2)
 
       await gA.ready()
       await gB.ready()
       await delay(50)
 
-      gA.set("base", 5)
+      baseA(5)
       await delay(500)
 
       expect(gA.value("step2")).toBe(30)
@@ -268,20 +268,20 @@ describe("distributed mode", () => {
       const gA = await makeGraph()
       const gB = await makeGraph()
 
-      gA.cell("a", 0)
-      gA.cell("b", 0)
-      gA.cell("sum", ["a", "b"], (a, b) => a + b)
+      const aA = gA.cell("a", 0)
+      const bA = gA.cell("b", 0)
+      gA.cell("sum", () => gA.value("a") + gA.value("b"))
 
       gB.cell("a", 0)
       gB.cell("b", 0)
-      gB.cell("sum", ["a", "b"], (a, b) => a + b)
+      gB.cell("sum", () => gB.value("a") + gB.value("b"))
 
       await gA.ready()
       await gB.ready()
       await delay(50)
 
-      gA.set("a", 10)
-      gA.set("b", 20)
+      aA(10)
+      bA(20)
       await delay(300)
 
       const snapA = gA.snapshot()
