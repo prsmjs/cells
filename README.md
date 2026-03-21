@@ -4,7 +4,9 @@
 
 <h1 align="center">@prsm/cells</h1>
 
-Reactive computation graph. Define named cells with dependencies - values propagate automatically when upstream changes. Async-first, distributed by default via Redis.
+A DAG of named cells. Each cell holds a value. When a cell changes, everything downstream recomputes automatically. Think spreadsheet - cell A1 is a price, B1 is a tax rate, C1 is `=A1 * (1 + B1)`. Now imagine A1 polls a stock API every 10 seconds and C1 calls an LLM to generate analysis. That's @prsm/cells.
+
+Continuous reactive dataflow for the backend. Not a job runner, not a task queue - a living graph of derived state that stays current as its inputs change. Computations can be sync or async (API calls, LLM calls, database queries), and with Redis the same graph runs across multiple instances with exactly-once computation and automatic value sync.
 
 ## Installation
 
@@ -12,7 +14,7 @@ Reactive computation graph. Define named cells with dependencies - values propag
 npm install @prsm/cells
 ```
 
-Requires Node.js >= 20 and Redis for distributed mode.
+Requires Node.js >= 20. Redis required only for distributed mode.
 
 ## Quick Start
 
@@ -32,18 +34,26 @@ g.set("price", 200) // total: 216
 
 ## Async Cells
 
-Any cell computation can be async. LLM calls, API fetches, database queries - all first-class.
+Any cell computation can be async. Debounce prevents expensive work from firing on every upstream tick.
 
 ```js
-g.cell("analysis", ["price"], async (price) => {
-  const response = await llm.complete(`analyze price: $${price}`)
-  return response.text
-}, { debounce: "10s" })
+g.cell("btc", 0)
+g.poll("btc", () => fetchPrice("BTC"), "10s")
+
+g.cell("analysis", ["btc"], async (price) => {
+  return await llm.complete(`BTC at $${price}. Brief market analysis.`)
+}, { debounce: "30s" })
+
+g.cell("alert", ["btc", "analysis"], (price, analysis) => {
+  return { price, analysis, timestamp: Date.now() }
+})
 ```
+
+Price polls every 10 seconds. Analysis recomputes at most every 30 seconds. Alert updates whenever either upstream settles. You describe the relationships - the graph handles when things run.
 
 ## Distributed Mode
 
-Add Redis and the graph works across multiple instances. Cell values live in Redis, computation is lock-coordinated so only one instance runs each handler.
+Add Redis and the graph works across multiple instances with no code changes.
 
 ```js
 const g = createGraph({
@@ -56,7 +66,7 @@ g.cell("doubled", ["price"], (p) => p * 2)
 await g.ready()
 ```
 
-No code changes needed - same graph definition, automatically distributed. `set()` on instance A propagates to instance B. Computed handlers run exactly once across all instances.
+`set()` on instance A propagates to instance B. Computed handlers run exactly once (lock winner computes, result is broadcast to all). Polling is coordinated so only one instance hits the external API per interval tick. Listeners fire on every instance, so each can push to its own connected clients.
 
 ## API
 
@@ -126,18 +136,15 @@ g.onError("analysis", (error, state) => { ... })
 g.snapshot() // { price: 100, tax: 0.08, total: 108 }
 ```
 
-### `g.poll(name, fn, interval)` - auto-refresh a source
+### `g.poll(name, fn, interval)` / `g.stop(name)` - auto-refresh a source
 
 ```js
 g.cell("btc", 0)
 g.poll("btc", () => fetchPrice("BTC"), "10s")
+g.stop("btc")
 ```
 
-In distributed mode, only one instance polls per interval tick.
-
-### `g.stop(name)` - stop polling
-
-### `g.remove(name)` / `g.removeTree(name)`
+### `g.remove(name)` / `g.removeTree(name)` - remove cells
 
 ### `g.cells()` - graph introspection
 
