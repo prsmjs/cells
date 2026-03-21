@@ -1,6 +1,6 @@
 {
   "name": "@prsm/cells",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Reactive computation graph with distributed coordination via Redis",
   "type": "module",
   "exports": {
