@@ -2,14 +2,14 @@
   <img src=".github/logo.svg" width="80" height="80" alt="cell logo">
 </p>
 
-<h1 align="center">@prsm/cell</h1>
+<h1 align="center">@prsm/cells</h1>
 
 Reactive computation graph. Define named cells with dependencies - values propagate automatically when upstream changes. Async-first, distributed by default via Redis.
 
 ## Installation
 
 ```bash
-npm install @prsm/cell
+npm install @prsm/cells
 ```
 
 Requires Node.js >= 20 and Redis for distributed mode.
@@ -17,7 +17,7 @@ Requires Node.js >= 20 and Redis for distributed mode.
 ## Quick Start
 
 ```js
-import { createGraph } from "@prsm/cell"
+import { createGraph } from "@prsm/cells"
 
 const g = createGraph()
 
