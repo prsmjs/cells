@@ -1,0 +1,38 @@
+{
+  "name": "@prsm/cells",
+  "version": "1.0.0",
+  "description": "Reactive computation graph with distributed coordination via Redis",
+  "type": "module",
+  "exports": {
+    ".": {
+      "default": "./src/index.js"
+    }
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "test": "vitest --reporter=verbose --run",
+    "test:watch": "vitest"
+  },
+  "keywords": [
+    "reactive",
+    "computation",
+    "graph",
+    "cells",
+    "distributed",
+    "redis"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@prsm/lock": "file:../lock",
+    "@prsm/ms": "^1.0.1",
+    "redis": "^5.1.1"
+  },
+  "devDependencies": {
+    "vitest": "^3.2.4"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
