@@ -4,19 +4,7 @@
 
 <h1 align="center">@prsm/cells</h1>
 
-A DAG of named cells. Each cell holds a value. When a cell changes, everything downstream recomputes automatically. Think spreadsheet - cell A1 is a price, B1 is a tax rate, C1 is `=A1 * (1 + B1)`. Now imagine A1 polls a stock API every 10 seconds and C1 calls an LLM to generate analysis. That's @prsm/cells.
-
-Continuous reactive dataflow for the backend. Not a job runner, not a task queue - a living graph of derived state that stays current as its inputs change. Computations can be sync or async (API calls, LLM calls, database queries), and with Redis the same graph runs across multiple instances with exactly-once computation and automatic value sync.
-
-## When to use it
-
-Cells is a shared state reactor. The graph models global state - prices, health metrics, feature flags, inventory levels - that is computed once and observed by many consumers. Distributed mode means multiple app instances share one reactive brain: one instance polls, one computes, all observe.
-
-It is not designed for per-user or per-request state. If every user session needs its own isolated computation graph (form validation, shopping carts, per-user recommendations), cells is the wrong tool. The graph is a singleton - one set of named cells, one set of derived values, visible to everyone.
-
-Good fit: infrastructure dashboards, dynamic pricing engines, CI pipeline monitors, real-time market data aggregation.
-
-Bad fit: per-session form state, per-user personalization, request-scoped computation.
+Reactive computation graph for Node.js. Define named cells with values or computed functions - when a cell changes, everything downstream recomputes automatically. Computations can be sync or async (API calls, database queries, LLM calls). With Redis, the same graph runs across multiple instances with exactly-once computation and value sync via pub/sub.
 
 ## Installation
 
