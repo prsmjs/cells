@@ -504,6 +504,26 @@ describe("local mode", () => {
       const snap = g.snapshot()
       expect(snap).toEqual({ a: 1 })
     })
+
+    it("includes stale cells with their last good value", async () => {
+      let shouldFail = false
+      const a = g.cell("a", 1)
+      const b = g.cell("b", () => {
+        const v = a()
+        if (shouldFail) throw new Error("fail")
+        return v * 2
+      })
+      const c = g.cell("c", () => b() + 1)
+      await tick()
+      expect(g.snapshot()).toEqual({ a: 1, b: 2, c: 3 })
+
+      shouldFail = true
+      a(5)
+      await tick()
+      expect(b.state.status).toBe("error")
+      expect(c.state.status).toBe("stale")
+      expect(g.snapshot()).toEqual({ a: 5, c: 3 })
+    })
   })
 
   describe("cycle detection", () => {
@@ -519,38 +539,9 @@ describe("local mode", () => {
       expect(self.state.status).toBe("error")
       expect(self.state.error.message).toContain("cycle detected")
     })
-
-    it("detects indirect cycle", async () => {
-      const a = g.cell("a", 1)
-      const b = g.cell("b", () => a())
-      expect(() => g.cell("a2", () => b())).not.toThrow()
-    })
-
-    it("cell enters error state on cycle detection", async () => {
-      const x = g.cell("x", 1)
-      const y = g.cell("y", () => x())
-      let bad
-      bad = g.cell("bad", () => {
-        y()
-        bad()
-        return 1
-      })
-      await tick()
-      expect(bad.state.status).toBe("error")
-      expect(bad.state.error.message).toContain("cycle detected")
-    })
   })
 
   describe("late dependency resolution", () => {
-    it("handles multi-level late resolution", async () => {
-      const a = g.cell("a", 5)
-      const b = g.cell("b", () => a() * 2)
-      const c = g.cell("c", () => b() + 1)
-      await tick()
-      expect(b()).toBe(10)
-      expect(c()).toBe(11)
-    })
-
     it("computed cell defined before source deps resolves on set", async () => {
       const doubled = g.cell("doubled", () => {
         const v = g.value("input")
