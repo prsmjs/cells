@@ -42,6 +42,75 @@ function renderTemplate(str, bindings) {
   return result
 }
 
+function wrapListener(callback, opts) {
+  if (!opts || (!opts.throttle && !opts.debounce)) return callback
+  if (opts.throttle && opts.debounce) {
+    throw new Error("throttle and debounce are mutually exclusive")
+  }
+
+  if (opts.throttle) {
+    const wait = ms(opts.throttle)
+    let lastFire = 0
+    let pending = null
+    let timer = null
+
+    const fire = (args) => {
+      lastFire = Date.now()
+      try { callback(...args) } catch {}
+    }
+
+    const wrapped = (...args) => {
+      const elapsed = Date.now() - lastFire
+      if (elapsed >= wait) {
+        pending = null
+        if (timer) { clearTimeout(timer); timer = null }
+        fire(args)
+      } else {
+        pending = args
+        if (!timer) {
+          timer = setTimeout(() => {
+            timer = null
+            if (pending) {
+              const a = pending
+              pending = null
+              fire(a)
+            }
+          }, wait - elapsed)
+          timer.unref?.()
+        }
+      }
+    }
+
+    wrapped._cleanup = () => {
+      if (timer) { clearTimeout(timer); timer = null }
+      pending = null
+    }
+    return wrapped
+  }
+
+  const wait = ms(opts.debounce)
+  let timer = null
+  let pending = null
+
+  const wrapped = (...args) => {
+    pending = args
+    if (timer) clearTimeout(timer)
+    timer = setTimeout(() => {
+      timer = null
+      const a = pending
+      pending = null
+      try { callback(...a) } catch {}
+    }, wait)
+    timer.unref?.()
+  }
+
+  wrapped._cleanup = () => {
+    if (timer) { clearTimeout(timer); timer = null }
+    pending = null
+  }
+  return wrapped
+}
+
 export function createGraph(options = {}) {
   const prefix = options.prefix ?? DEFAULT_PREFIX
   const lockTtl = ms(options.lockTtl ?? DEFAULT_LOCK_TTL)
@@ -253,14 +322,19 @@ export function createGraph(options = {}) {
       return c.value
     }
 
-    accessor.on = (callback) => {
+    accessor.on = (callback, opts) => {
       assertNotDestroyed()
+      const wrapped = wrapListener(callback, opts)
       const id = randomUUID()
       if (!listeners.has(name)) listeners.set(name, new Map())
-      listeners.get(name).set(id, callback)
+      listeners.get(name).set(id, wrapped)
       return () => {
         const map = listeners.get(name)
-        if (map) map.delete(id)
+        if (map) {
+          const fn = map.get(id)
+          fn?._cleanup?.()
+          map.delete(id)
+        }
       }
     }
 
@@ -682,11 +756,16 @@ export function createGraph(options = {}) {
     return snap
   }
 
-  function on(callback) {
+  function on(callback, opts) {
     assertNotDestroyed()
+    const wrapped = wrapListener(callback, opts)
     const id = randomUUID()
-    wildcardListeners.set(id, callback)
-    return () => wildcardListeners.delete(id)
+    wildcardListeners.set(id, wrapped)
+    return () => {
+      const fn = wildcardListeners.get(id)
+      fn?._cleanup?.()
+      wildcardListeners.delete(id)
+    }
   }
 
   function fireListeners(name, val, state) {
@@ -884,6 +963,10 @@ export function createGraph(options = {}) {
     pollTimers.clear()
     for (const timer of debounceTimers.values()) clearTimeout(timer)
     debounceTimers.clear()
+    for (const map of listeners.values()) {
+      for (const fn of map.values()) fn?._cleanup?.()
+    }
+    for (const fn of wildcardListeners.values()) fn?._cleanup?.()
     await Promise.all(activePropagations).catch(() => {})
     cells.clear()
     accessors.clear()

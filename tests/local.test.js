@@ -480,6 +480,170 @@ describe("local mode", () => {
     })
   })
 
+  describe("listener rate-limiting", () => {
+    it("throttle fires immediately on first event", () => {
+      vi.useFakeTimers()
+      try {
+        const g = createGraph()
+        const values = []
+        const a = g.cell("a", 0)
+        a.on((val) => values.push(val), { throttle: "100ms" })
+        a(1)
+        expect(values).toEqual([1])
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it("throttle coalesces events within window, fires latest at close", async () => {
+      vi.useFakeTimers()
+      try {
+        const g = createGraph()
+        const values = []
+        const a = g.cell("a", 0)
+        a.on((val) => values.push(val), { throttle: "100ms" })
+        a(1)
+        a(2)
+        a(3)
+        expect(values).toEqual([1])
+        await vi.advanceTimersByTimeAsync(100)
+        expect(values).toEqual([1, 3])
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it("throttle fires next event immediately after window expires", async () => {
+      vi.useFakeTimers()
+      try {
+        const g = createGraph()
+        const values = []
+        const a = g.cell("a", 0)
+        a.on((val) => values.push(val), { throttle: "100ms" })
+        a(1)
+        await vi.advanceTimersByTimeAsync(150)
+        a(2)
+        expect(values).toEqual([1, 2])
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it("debounce waits for quiet, fires latest", async () => {
+      vi.useFakeTimers()
+      try {
+        const g = createGraph()
+        const values = []
+        const a = g.cell("a", 0)
+        a.on((val) => values.push(val), { debounce: "100ms" })
+        a(1)
+        a(2)
+        a(3)
+        expect(values).toEqual([])
+        await vi.advanceTimersByTimeAsync(100)
+        expect(values).toEqual([3])
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it("debounce resets on each event", async () => {
+      vi.useFakeTimers()
+      try {
+        const g = createGraph()
+        const values = []
+        const a = g.cell("a", 0)
+        a.on((val) => values.push(val), { debounce: "100ms" })
+        a(1)
+        await vi.advanceTimersByTimeAsync(50)
+        a(2)
+        await vi.advanceTimersByTimeAsync(50)
+        expect(values).toEqual([])
+        await vi.advanceTimersByTimeAsync(50)
+        expect(values).toEqual([2])
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it("throws when both throttle and debounce are set", () => {
+      const g = createGraph()
+      const a = g.cell("a", 0)
+      expect(() => a.on(() => {}, { throttle: "100ms", debounce: "100ms" })).toThrow(/mutually exclusive/)
+    })
+
+    it("unsubscribe clears pending throttle timer", async () => {
+      vi.useFakeTimers()
+      try {
+        const g = createGraph()
+        const values = []
+        const a = g.cell("a", 0)
+        const off = a.on((val) => values.push(val), { throttle: "100ms" })
+        a(1)
+        a(2)
+        off()
+        await vi.advanceTimersByTimeAsync(200)
+        expect(values).toEqual([1])
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it("unsubscribe clears pending debounce timer", async () => {
+      vi.useFakeTimers()
+      try {
+        const g = createGraph()
+        const values = []
+        const a = g.cell("a", 0)
+        const off = a.on((val) => values.push(val), { debounce: "100ms" })
+        a(1)
+        off()
+        await vi.advanceTimersByTimeAsync(200)
+        expect(values).toEqual([])
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it("works on wildcard listener", async () => {
+      vi.useFakeTimers()
+      try {
+        const g = createGraph()
+        const events = []
+        g.on((name, val) => events.push({ name, val }), { throttle: "100ms" })
+        const a = g.cell("a", 0)
+        a(1)
+        a(2)
+        expect(events).toEqual([{ name: "a", val: 1 }])
+        await vi.advanceTimersByTimeAsync(100)
+        expect(events).toEqual([{ name: "a", val: 1 }, { name: "a", val: 2 }])
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it("callback errors don't break subsequent fires", async () => {
+      vi.useFakeTimers()
+      try {
+        const g = createGraph()
+        const values = []
+        const a = g.cell("a", 0)
+        let count = 0
+        a.on((val) => {
+          count++
+          if (count === 1) throw new Error("boom")
+          values.push(val)
+        }, { throttle: "100ms" })
+        a(1)
+        await vi.advanceTimersByTimeAsync(150)
+        a(2)
+        expect(values).toEqual([2])
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+  })
+
   describe("snapshot", () => {
     it("returns all current values", async () => {
       const a = g.cell("a", 1)
