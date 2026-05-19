@@ -12,7 +12,7 @@ const tracking = new AsyncLocalStorage()
 
 function parseTemplateDeps(str) {
   const deps = new Set()
-  const re = /\{\{(?:#if\s+)?(\w+)(?:[.\[][^}]*?)?\}\}/g
+  const re = /\{\{(?:#if\s+)?([\w-]+)(?:[.\[][^}]*?)?\}\}/g
   let m
   while ((m = re.exec(str)) !== null) deps.add(m[1])
   return [...deps]
@@ -29,11 +29,11 @@ function resolveBinding(key, bindings) {
 }
 
 function renderTemplate(str, bindings) {
-  let result = str.replace(/\{\{#if\s+([\w.[\]]+)\}\}([\s\S]*?)\{\{\/if\}\}/g, (_, key, body) => {
+  let result = str.replace(/\{\{#if\s+([\w\-.[\]]+)\}\}([\s\S]*?)\{\{\/if\}\}/g, (_, key, body) => {
     const val = resolveBinding(key, bindings)
     return val ? body : ""
   })
-  result = result.replace(/\{\{([\w.[\]]+)\}\}/g, (_, key) => {
+  result = result.replace(/\{\{([\w\-.[\]]+)\}\}/g, (_, key) => {
     const val = resolveBinding(key, bindings)
     if (val === undefined || val === null) return ""
     if (typeof val === "object") return JSON.stringify(val)

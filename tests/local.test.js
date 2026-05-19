@@ -1128,6 +1128,26 @@ describe("local mode", () => {
       const info = g.cells().find(c => c.name === "greet")
       expect(info.metadata).toEqual({ description: "greeting line" })
     })
+
+    it("handles cell names with hyphens", async () => {
+      g.cell("btc-price", 67000)
+      g.cell("eth-price", 3400)
+      const t = g.template("summary", "BTC ${{btc-price}}, ETH ${{eth-price}}")
+      await tick()
+      expect(t()).toBe("BTC $67000, ETH $3400")
+      const info = g.cells().find(c => c.name === "summary")
+      expect(info.deps.sort()).toEqual(["btc-price", "eth-price"])
+    })
+
+    it("handles hyphenated names in #if conditionals", async () => {
+      g.cell("risk-tier", "high")
+      const t = g.template("msg", "{{#if risk-tier}}tier: {{risk-tier}}{{/if}}")
+      await tick()
+      expect(t()).toBe("tier: high")
+      g.set("risk-tier", "")
+      await tick()
+      expect(t()).toBe("")
+    })
   })
 })
 
