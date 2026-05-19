@@ -222,14 +222,75 @@ g.removeTree("price")
 ```js
 const info = g.cells()
 // [
-//   { name: "price", type: "source", deps: [], dependents: ["total", "analysis"], status: "current" },
-//   { name: "tax-rate", type: "source", deps: [], dependents: ["total"], status: "current" },
-//   { name: "total", type: "computed", deps: ["price", "tax-rate"], dependents: [], status: "current" },
-//   { name: "analysis", type: "computed", deps: ["price"], dependents: ["summary"], status: "pending" },
+//   { name: "price", type: "source", kind: "source", deps: [], dependents: ["total", "analysis"], status: "current", metadata: { description: "..." }, source: { type: "sharepoint", ... }, historyLimit: 100 },
+//   { name: "tax-rate", type: "source", kind: "source", deps: [], dependents: ["total"], status: "current" },
+//   { name: "total", type: "computed", kind: "computed", deps: ["price", "tax-rate"], dependents: [], status: "current" },
+//   { name: "system-prompt", type: "computed", kind: "template", deps: ["doc", "metrics"], dependents: ["analysis"], status: "current", template: "Analyzing {{doc.title}}..." },
 // ]
 ```
 
 returns the full graph topology with current statuses. useful for devtools integration and debugging.
+
+`kind` distinguishes regular `source`/`computed` cells from `template` cells. `metadata`, `source`, `template`, and `historyLimit` are only present when set, so devtools can render extra UI for them conditionally.
+
+### cell metadata - `metadata` and `source` options
+
+any cell accepts `metadata` and `source` in its options bag. both are opaque to the graph - they are stored and surfaced through `g.cells()` so devtools and other tooling can render extra information.
+
+```js
+g.cell("price", 100, {
+  metadata: { description: "current BTC price", units: "usd" }
+})
+
+g.cell("documents", [], {
+  source: { type: "sharepoint", site: "https://...", library: "Contracts", interval: "5m" }
+})
+```
+
+`source` is the conventional slot for describing where a cell's values come from (polled API, webhook receiver, queue worker, file watcher). `metadata` is a free-form bag for anything else (descriptions, owner, units, tags). neither affects propagation, compute, or any runtime behavior.
+
+### `g.template(name, string, options?)` - templated string cell
+
+defines a computed cell whose value is the rendered string. dependencies are discovered by parsing `{{...}}` references in the template body. accepts the same options as a regular cell (`debounce`, `equals`, `metadata`, `source`, `history`).
+
+```js
+g.cell("doc", { title: "spec" })
+g.cell("metrics", { open: 12 })
+
+g.template("system-prompt", `
+  Analyzing "{{doc.title}}".
+  Metrics: {{metrics}}.
+  {{#if metrics.open}}There are open items.{{/if}}
+`)
+```
+
+- `{{path}}` resolves dot/bracket paths against the referenced cell's value
+- `{{#if path}}...{{/if}}` includes the body when the value is truthy
+- object values are JSON-stringified, null/undefined render as empty
+- the cell shows up in `g.cells()` with `kind: "template"` and the source string in `template`
+
+template cells are first-class computed cells - they participate in propagation, can be observed, can be depended on by other cells, and are visible in devtools as the exact rendered prompt being sent to an LLM (or wherever). this is the audit trail clients ask for.
+
+### `g.history(name, limit?)` - recent values for a cell
+
+opt-in per cell via `{ history: true }` (default 100-entry ring buffer) or `{ history: N }` for a custom limit. stored per-instance, in memory only. useful for sparklines, debugging, and devtools.
+
+```js
+g.cell("price", 100, { history: true })
+g.set("price", 105)
+g.set("price", 110)
+
+g.history("price")
+// [
+//   { value: 100, timestamp: 1711036800000 },
+//   { value: 105, timestamp: 1711036801000 },
+//   { value: 110, timestamp: 1711036802000 },
+// ]
+
+g.history("price", 5)  // last 5 entries
+```
+
+entries are recorded only when the cell's value actually changes (after the equality check). cells without `history` set return `[]`. in distributed mode history is per-instance and not synced via Redis - it is a local debugging affordance, not a durable audit trail (use `@prsm/workflow` for that).
 
 ### `g.destroy()` - tear down the graph
 

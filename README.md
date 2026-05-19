@@ -135,9 +135,71 @@ g.on((name, value, state) => { ... })  // wildcard listener
 g.snapshot()                  // { price: 200, tax: 0.08, total: 216 }
 g.cells()                    // graph topology + statuses
 
+g.template("prompt", "Hi {{name}}")  // templated string cell
+g.history("price")                    // recent values (if history enabled)
+
 await g.ready()               // required for distributed mode
 await g.destroy()             // tear down
 ```
+
+### Cell metadata
+
+Any cell accepts `metadata` and `source` in its options bag. These are opaque to the graph but surfaced through `g.cells()` for tooling and devtools to render.
+
+```js
+g.cell("price", 100, {
+  metadata: { description: "current BTC price", units: "usd" }
+})
+
+g.cell("documents", [], {
+  source: { type: "sharepoint", site: "https://...", library: "Contracts", interval: "5m" }
+})
+```
+
+`source` is a free-form descriptor of where a cell's values originate (polled API, webhook receiver, queue worker, etc). It's just a convention - the graph does not act on it. Use it to give clients and developers visibility into the data provenance of every cell.
+
+### Templates
+
+`g.template(name, string, options?)` defines a computed cell whose value is the rendered string. Dependencies are discovered by parsing `{{...}}` references in the template body.
+
+```js
+g.cell("doc", { title: "spec" })
+g.cell("metrics", { open: 12, closed: 4 })
+
+g.template("system-prompt", `
+  Analyzing "{{doc.title}}".
+  Metrics: {{metrics}}.
+  {{#if metrics.open}}There are open items.{{/if}}
+`)
+```
+
+- `{{path}}` resolves dot/bracket paths against the referenced cell's value
+- `{{#if path}}...{{/if}}` includes the body when the value is truthy
+- Object values are JSON-stringified
+- `null`/`undefined` values render as empty strings
+
+Template cells are first-class computed cells. They show up in `g.cells()` (with `kind: "template"` and the source string), participate in propagation, can be observed, can be depended on, and accept the same options as any computed cell (`debounce`, `equals`, `metadata`, `source`, `history`).
+
+### History
+
+Opt-in per cell via `{ history: true }` (defaults to a 100-entry ring buffer) or `{ history: N }` for a custom limit. Stored per-instance, in memory only - useful for sparklines, debugging, and devtools, not for durable audit trails.
+
+```js
+g.cell("price", 100, { history: true })
+g.set("price", 105)
+g.set("price", 110)
+
+g.history("price")
+// [
+//   { value: 100, timestamp: 1711036800000 },
+//   { value: 105, timestamp: 1711036801000 },
+//   { value: 110, timestamp: 1711036802000 },
+// ]
+
+g.history("price", 5)  // last 5 entries
+```
+
+Entries are recorded only when the cell's value actually changes (after the equality check). Cells without `history` set return `[]`.
 
 ## Polling
 

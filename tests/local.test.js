@@ -935,6 +935,200 @@ describe("local mode", () => {
       expect(b()).toBe(50)
     })
   })
+
+  describe("metadata", () => {
+    it("stores arbitrary metadata on a cell", () => {
+      g.cell("price", 100, { metadata: { description: "current BTC price", units: "usd" } })
+      const info = g.cells().find(c => c.name === "price")
+      expect(info.metadata).toEqual({ description: "current BTC price", units: "usd" })
+    })
+
+    it("stores source descriptor on a cell", () => {
+      g.cell("docs", [], { source: { type: "sharepoint", site: "https://x", interval: "5m" } })
+      const info = g.cells().find(c => c.name === "docs")
+      expect(info.source).toEqual({ type: "sharepoint", site: "https://x", interval: "5m" })
+    })
+
+    it("omits metadata/source keys when not set", () => {
+      g.cell("plain", 1)
+      const info = g.cells().find(c => c.name === "plain")
+      expect(info.metadata).toBeUndefined()
+      expect(info.source).toBeUndefined()
+    })
+
+    it("metadata survives on computed cells", async () => {
+      g.cell("a", 1)
+      g.cell("b", () => g.value("a") * 2, { metadata: { description: "doubled" } })
+      await tick()
+      const info = g.cells().find(c => c.name === "b")
+      expect(info.metadata).toEqual({ description: "doubled" })
+    })
+  })
+
+  describe("history", () => {
+    it("returns empty array when history not enabled", () => {
+      const price = g.cell("price", 100)
+      price(200)
+      expect(g.history("price")).toEqual([])
+    })
+
+    it("records initial value when history enabled", () => {
+      g.cell("price", 100, { history: true })
+      const h = g.history("price")
+      expect(h).toHaveLength(1)
+      expect(h[0].value).toBe(100)
+      expect(typeof h[0].timestamp).toBe("number")
+    })
+
+    it("records updates", () => {
+      const price = g.cell("price", 100, { history: true })
+      price(200)
+      price(300)
+      const h = g.history("price")
+      expect(h.map(e => e.value)).toEqual([100, 200, 300])
+    })
+
+    it("respects custom limit", () => {
+      const price = g.cell("price", 0, { history: 3 })
+      for (let i = 1; i <= 5; i++) price(i)
+      const h = g.history("price")
+      expect(h.map(e => e.value)).toEqual([3, 4, 5])
+    })
+
+    it("limits to default of 100", () => {
+      const price = g.cell("price", 0, { history: true })
+      for (let i = 1; i <= 150; i++) price(i)
+      const h = g.history("price")
+      expect(h).toHaveLength(100)
+      expect(h[0].value).toBe(51)
+      expect(h[99].value).toBe(150)
+    })
+
+    it("can slice with explicit limit on read", () => {
+      const price = g.cell("price", 0, { history: true })
+      for (let i = 1; i <= 10; i++) price(i)
+      expect(g.history("price", 3).map(e => e.value)).toEqual([8, 9, 10])
+    })
+
+    it("records computed cell values", async () => {
+      const a = g.cell("a", 1)
+      g.cell("doubled", () => a() * 2, { history: true })
+      await tick()
+      a(2)
+      await tick()
+      a(3)
+      await tick()
+      const h = g.history("doubled")
+      expect(h.map(e => e.value)).toEqual([2, 4, 6])
+    })
+
+    it("does not record when value is unchanged (equality)", () => {
+      const price = g.cell("price", 100, { history: true })
+      price(100)
+      price(100)
+      const h = g.history("price")
+      expect(h).toHaveLength(1)
+    })
+
+    it("clears history when cell removed", () => {
+      const price = g.cell("price", 100, { history: true })
+      price(200)
+      g.cell("other", 1)
+      price.remove()
+      expect(g.history("price")).toEqual([])
+    })
+  })
+
+  describe("template", () => {
+    it("renders static template with no deps", async () => {
+      const t = g.template("greet", "hello world")
+      await tick()
+      expect(t()).toBe("hello world")
+    })
+
+    it("renders with single dep", async () => {
+      g.cell("name", "alice")
+      const t = g.template("greet", "hello {{name}}")
+      await tick()
+      expect(t()).toBe("hello alice")
+    })
+
+    it("renders with nested path", async () => {
+      g.cell("doc", { title: "spec", author: { name: "bob" } })
+      const t = g.template("intro", "{{doc.title}} by {{doc.author.name}}")
+      await tick()
+      expect(t()).toBe("spec by bob")
+    })
+
+    it("stringifies object values", async () => {
+      g.cell("metrics", { a: 1, b: 2 })
+      const t = g.template("desc", "metrics: {{metrics}}")
+      await tick()
+      expect(t()).toBe(`metrics: {"a":1,"b":2}`)
+    })
+
+    it("renders empty for missing values", async () => {
+      g.cell("name", null)
+      const t = g.template("greet", "hello {{name}}!")
+      await tick()
+      expect(t()).toBe("hello !")
+    })
+
+    it("supports #if conditionals", async () => {
+      g.cell("flag", true)
+      g.cell("note", "important")
+      const t = g.template("msg", "base{{#if flag}}: {{note}}{{/if}}")
+      await tick()
+      expect(t()).toBe("base: important")
+      g.set("flag", false)
+      await tick()
+      expect(t()).toBe("base")
+    })
+
+    it("re-renders when dep changes", async () => {
+      const name = g.cell("name", "alice")
+      const t = g.template("greet", "hello {{name}}")
+      await tick()
+      expect(t()).toBe("hello alice")
+      name("bob")
+      await tick()
+      expect(t()).toBe("hello bob")
+    })
+
+    it("is consumable as a dep by other cells", async () => {
+      g.cell("name", "alice")
+      g.template("greet", "hello {{name}}")
+      const upper = g.cell("upper", () => g.value("greet").toUpperCase())
+      await tick()
+      expect(upper()).toBe("HELLO ALICE")
+      g.set("name", "bob")
+      await tick()
+      expect(upper()).toBe("HELLO BOB")
+    })
+
+    it("auto-tracks all referenced cells as deps", async () => {
+      g.cell("a", "X")
+      g.cell("b", "Y")
+      g.template("combined", "{{a}}-{{b}}")
+      await tick()
+      const info = g.cells().find(c => c.name === "combined")
+      expect(info.deps.sort()).toEqual(["a", "b"])
+      expect(info.kind).toBe("template")
+      expect(info.template).toBe("{{a}}-{{b}}")
+    })
+
+    it("throws on non-string body", () => {
+      expect(() => g.template("x", 42)).toThrow("template body must be a string")
+    })
+
+    it("accepts metadata", async () => {
+      g.cell("name", "alice")
+      g.template("greet", "hi {{name}}", { metadata: { description: "greeting line" } })
+      await tick()
+      const info = g.cells().find(c => c.name === "greet")
+      expect(info.metadata).toEqual({ description: "greeting line" })
+    })
+  })
 })
 
 function tick() {

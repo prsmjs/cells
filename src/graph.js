@@ -6,8 +6,41 @@ import { createRedisManager } from "./redis.js"
 
 const DEFAULT_LOCK_TTL = 30000
 const DEFAULT_PREFIX = "cell:"
+const DEFAULT_HISTORY_LIMIT = 100
 
 const tracking = new AsyncLocalStorage()
+
+function parseTemplateDeps(str) {
+  const deps = new Set()
+  const re = /\{\{(?:#if\s+)?(\w+)(?:[.\[][^}]*?)?\}\}/g
+  let m
+  while ((m = re.exec(str)) !== null) deps.add(m[1])
+  return [...deps]
+}
+
+function resolveBinding(key, bindings) {
+  const parts = key.split(/[.\[\]]/).filter(Boolean)
+  let current = bindings
+  for (const part of parts) {
+    if (current == null) return undefined
+    current = current[part]
+  }
+  return current
+}
+
+function renderTemplate(str, bindings) {
+  let result = str.replace(/\{\{#if\s+([\w.[\]]+)\}\}([\s\S]*?)\{\{\/if\}\}/g, (_, key, body) => {
+    const val = resolveBinding(key, bindings)
+    return val ? body : ""
+  })
+  result = result.replace(/\{\{([\w.[\]]+)\}\}/g, (_, key) => {
+    const val = resolveBinding(key, bindings)
+    if (val === undefined || val === null) return ""
+    if (typeof val === "object") return JSON.stringify(val)
+    return String(val)
+  })
+  return result
+}
 
 export function createGraph(options = {}) {
   const prefix = options.prefix ?? DEFAULT_PREFIX
@@ -22,6 +55,7 @@ export function createGraph(options = {}) {
   const debounceTimers = new Map()
   const activePropagations = new Set()
   const initialComputePromises = new Map()
+  const histories = new Map()
   let redis = null
   let destroyed = false
 
@@ -33,6 +67,7 @@ export function createGraph(options = {}) {
     return {
       name,
       type: config.type,
+      kind: config.kind || config.type,
       deps: new Set(config.deps || []),
       dependents: new Set(),
       fn: config.fn || null,
@@ -45,7 +80,23 @@ export function createGraph(options = {}) {
       computeTime: null,
       version: 0,
       generation: 0,
+      metadata: config.metadata || null,
+      source: config.source || null,
+      historyLimit: config.historyLimit || 0,
+      template: config.template || null,
     }
+  }
+
+  function recordHistory(name, value) {
+    const c = cells.get(name)
+    if (!c || c.historyLimit <= 0) return
+    let buf = histories.get(name)
+    if (!buf) {
+      buf = []
+      histories.set(name, buf)
+    }
+    buf.push({ value, timestamp: Date.now() })
+    if (buf.length > c.historyLimit) buf.shift()
   }
 
   function rebuildDependents() {
@@ -257,16 +308,35 @@ export function createGraph(options = {}) {
 
   let initialComputeScheduled = false
 
+  function resolveHistoryLimit(opt) {
+    if (opt === true) return DEFAULT_HISTORY_LIMIT
+    if (typeof opt === "number" && opt > 0) return Math.floor(opt)
+    return 0
+  }
+
   function cell(name, valueOrFn, maybeOptions) {
     assertNotDestroyed()
     if (cells.has(name)) throw new Error(`cell already exists: ${name}`)
 
+    const opts = (typeof valueOrFn === "function" ? maybeOptions : maybeOptions) || {}
+    const metadata = opts.metadata ?? null
+    const source = opts.source ?? null
+    const historyLimit = resolveHistoryLimit(opts.history)
+
     if (typeof valueOrFn === "function") {
       const fn = valueOrFn
-      const opts = maybeOptions || {}
       const debounce = opts.debounce ? ms(opts.debounce) : 0
 
-      const c = makeCell(name, { type: "computed", deps: [], fn, debounce, equals: opts.equals })
+      const c = makeCell(name, {
+        type: "computed",
+        deps: [],
+        fn,
+        debounce,
+        equals: opts.equals,
+        metadata,
+        source,
+        historyLimit,
+      })
       cells.set(name, c)
 
       const acc = createAccessor(name)
@@ -279,9 +349,20 @@ export function createGraph(options = {}) {
       return acc
     }
 
-    const c = makeCell(name, { type: "source", value: valueOrFn })
+    const c = makeCell(name, {
+      type: "source",
+      value: valueOrFn,
+      equals: opts.equals,
+      metadata,
+      source,
+      historyLimit,
+    })
     cells.set(name, c)
     rebuildDependents()
+
+    if (valueOrFn !== undefined) {
+      recordHistory(name, valueOrFn)
+    }
 
     const acc = createAccessor(name)
     accessors.set(name, acc)
@@ -289,6 +370,38 @@ export function createGraph(options = {}) {
     if (!options.redis) scheduleInitialComputeBatch()
 
     return acc
+  }
+
+  function template(name, str, maybeOptions) {
+    assertNotDestroyed()
+    if (typeof str !== "string") {
+      throw new Error(`template body must be a string, got ${typeof str}`)
+    }
+    const opts = maybeOptions || {}
+    const depNames = parseTemplateDeps(str)
+
+    const fn = () => {
+      const bindings = {}
+      for (const dep of depNames) bindings[dep] = value(dep)
+      return renderTemplate(str, bindings)
+    }
+
+    const acc = cell(name, fn, opts)
+    const c = cells.get(name)
+    if (c) {
+      c.kind = "template"
+      c.template = str
+    }
+    return acc
+  }
+
+  function history(name, limit) {
+    const buf = histories.get(name)
+    if (!buf) return []
+    if (typeof limit === "number" && limit > 0) {
+      return buf.slice(-limit)
+    }
+    return buf.slice()
   }
 
   function scheduleInitialComputeBatch() {
@@ -577,6 +690,7 @@ export function createGraph(options = {}) {
   }
 
   function fireListeners(name, val, state) {
+    recordHistory(name, val)
     const map = listeners.get(name)
     if (map) {
       for (const [, cb] of map) {
@@ -687,6 +801,7 @@ export function createGraph(options = {}) {
     accessors.delete(name)
     listeners.delete(name)
     errorListeners.delete(name)
+    histories.delete(name)
     rebuildDependents()
     if (redis) redis.deleteValue(name).catch(() => {})
   }
@@ -694,13 +809,19 @@ export function createGraph(options = {}) {
   function getCells() {
     const result = []
     for (const [name, c] of cells) {
-      result.push({
+      const entry = {
         name,
         type: c.type,
+        kind: c.kind || c.type,
         deps: [...c.deps],
         dependents: [...c.dependents],
         status: c.status,
-      })
+      }
+      if (c.metadata) entry.metadata = c.metadata
+      if (c.source) entry.source = c.source
+      if (c.template) entry.template = c.template
+      if (c.historyLimit > 0) entry.historyLimit = c.historyLimit
+      result.push(entry)
     }
     return result
   }
@@ -769,6 +890,7 @@ export function createGraph(options = {}) {
     listeners.clear()
     errorListeners.clear()
     wildcardListeners.clear()
+    histories.clear()
     if (redis) {
       await redis.disconnect()
       redis = null
@@ -777,6 +899,8 @@ export function createGraph(options = {}) {
 
   const graph = {
     cell,
+    template,
+    history,
     set,
     get: getState,
     value,
