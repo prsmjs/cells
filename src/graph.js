@@ -112,6 +112,7 @@ function wrapListener(callback, opts) {
 }
 
 export function createGraph(options = {}) {
+  const tracer = options.tracer ?? null
   const prefix = options.prefix ?? DEFAULT_PREFIX
   const lockTtl = ms(options.lockTtl ?? DEFAULT_LOCK_TTL)
 
@@ -552,7 +553,9 @@ export function createGraph(options = {}) {
     const start = Date.now()
     try {
       const tracker = { deps: new Set() }
-      const result = await tracking.run(tracker, c.fn)
+      const result = tracer
+        ? await tracer.span('cells.compute', { 'cell.name': name, 'cell.prefix': prefix }, () => tracking.run(tracker, c.fn))
+        : await tracking.run(tracker, c.fn)
 
       if (c.generation !== gen) return false
 
