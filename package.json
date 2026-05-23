@@ -1,6 +1,6 @@
 {
   "name": "@prsm/cells",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Reactive computation graph with distributed coordination via Redis",
   "type": "module",
   "exports": {
@@ -25,7 +25,7 @@
   ],
   "license": "MIT",
   "dependencies": {
-    "@prsm/lock": "^1.0.1",
+    "@prsm/lock": "^1.1.0",
     "@prsm/ms": "^2.0.0",
     "redis": "^5.1.1"
   },
