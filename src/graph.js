@@ -908,11 +908,30 @@ export function createGraph(options = {}) {
     return result
   }
 
+  const REGISTRY_HEARTBEAT_MS = 15000
+  const REGISTRY_TTL_SEC = 60
+  let registryTimer = null
+
+  async function writeRegistryNow() {
+    if (!redis) return
+    try { await redis.writeRegistry(getCells(), REGISTRY_TTL_SEC) } catch {}
+  }
+
+  async function getTopologyAcrossInstances() {
+    if (!redis) return { [redis?.instanceId ?? "local"]: getCells() }
+    const remote = await redis.getAllRegistries()
+    remote[redis.instanceId] = getCells()
+    return remote
+  }
+
   async function ready() {
     if (!options.redis) return
 
     redis = createRedisManager(options.redis, prefix)
     await redis.connect()
+    await writeRegistryNow()
+    registryTimer = setInterval(() => { writeRegistryNow() }, REGISTRY_HEARTBEAT_MS)
+    registryTimer.unref?.()
 
     const cellNames = [...cells.keys()]
     if (cellNames.length > 0) {
@@ -962,6 +981,7 @@ export function createGraph(options = {}) {
 
   async function destroy() {
     destroyed = true
+    if (registryTimer) { clearInterval(registryTimer); registryTimer = null }
     for (const timer of pollTimers.values()) clearInterval(timer)
     pollTimers.clear()
     for (const timer of debounceTimers.values()) clearTimeout(timer)
@@ -978,6 +998,7 @@ export function createGraph(options = {}) {
     wildcardListeners.clear()
     histories.clear()
     if (redis) {
+      await redis.deleteRegistry().catch(() => {})
       await redis.disconnect()
       redis = null
     }
@@ -993,6 +1014,7 @@ export function createGraph(options = {}) {
     snapshot,
     on,
     cells: getCells,
+    cellsAcrossInstances: getTopologyAcrossInstances,
     ready,
     destroy,
   }

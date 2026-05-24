@@ -105,6 +105,42 @@ export function createRedisManager(options, prefix) {
     await client.del(`${prefix}value:${name}`).catch(() => {})
   }
 
+  async function writeRegistry(snapshot, ttlSec) {
+    if (!connected) return
+    await client.set(
+      `${prefix}registry:${instanceId}`,
+      JSON.stringify(snapshot),
+      { EX: ttlSec }
+    ).catch(() => {})
+  }
+
+  async function deleteRegistry() {
+    if (!connected) return
+    await client.del(`${prefix}registry:${instanceId}`).catch(() => {})
+  }
+
+  async function getAllRegistries() {
+    if (!connected) return {}
+    try {
+      const keys = []
+      for await (const batch of client.scanIterator({ MATCH: `${prefix}registry:*`, COUNT: 100 })) {
+        if (Array.isArray(batch)) keys.push(...batch)
+        else keys.push(batch)
+      }
+      if (!keys.length) return {}
+      const values = await client.mGet(keys)
+      const out = {}
+      keys.forEach((key, i) => {
+        const id = key.slice(`${prefix}registry:`.length)
+        if (!values[i]) return
+        try { out[id] = JSON.parse(values[i]) } catch {}
+      })
+      return out
+    } catch {
+      return {}
+    }
+  }
+
   return {
     get instanceId() { return instanceId },
     get connected() { return connected },
@@ -119,5 +155,8 @@ export function createRedisManager(options, prefix) {
     deleteValue,
     onSync,
     offSync,
+    writeRegistry,
+    deleteRegistry,
+    getAllRegistries,
   }
 }
