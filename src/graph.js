@@ -8,6 +8,115 @@ const DEFAULT_LOCK_TTL = 30000
 const DEFAULT_PREFIX = "cell:"
 const DEFAULT_HISTORY_LIMIT = 100
 
+/**
+ * @typedef {Object} RedisOptions
+ * Connection settings forwarded as-is to node-redis `createClient`. Providing this object switches the graph into distributed mode. Omit it to run purely in-process.
+ * @property {string} [url] - full connection string, for example `redis://user:pass@host:6379/0`. Takes precedence over the discrete host/port fields below
+ * @property {string} [host] - redis host (default `127.0.0.1`)
+ * @property {number} [port] - redis port (default `6379`)
+ * @property {string} [password] - password, if the server requires auth
+ */
+
+/**
+ * @typedef {Object} GraphOptions
+ * @property {RedisOptions} [redis] - redis connection settings. When set, cell values live in Redis, computation is lock-coordinated so each handler runs on exactly one instance, and value changes sync across instances via pub/sub. When omitted, the graph runs entirely in-process (good for tests, scripts, and single-instance apps)
+ * @property {string} [prefix] - prefix for every Redis key this graph touches (default `"cell:"`). Only relevant in distributed mode. Use distinct prefixes to run independent graphs against one Redis database
+ * @property {string|number} [lockTtl] - how long a compute or poll lock survives before it can be re-acquired, as a duration string (`"2m"`) or milliseconds (default `"30s"`). Set this longer than your slowest async handler. If a computation outlives the TTL another instance may recompute, which is safe because cell writes are versioned and last-write-wins
+ * @property {object} [tracer] - optional `@prsm/trace` tracer. When set, every cell computation runs inside a `cells.compute` span tagged with the cell name and prefix
+ */
+
+/**
+ * @typedef {Object} CellOptions
+ * Options bag accepted by `cell`, `template`, and the source-cell form. Every field is optional.
+ * @property {string|number} [debounce] - for computed cells, wait this long after the last dependency change before recomputing, as a duration string (`"2s"`) or milliseconds (default `0`, no debounce). If deps change again within the window the timer resets. Use this to keep an expensive async handler from firing on every rapid upstream tick
+ * @property {(prev: any, next: any) => boolean} [equals] - custom equality test deciding whether a new value counts as a change. Returning `true` suppresses propagation and listeners. Defaults to `===` for primitives and a `JSON.stringify` comparison for objects and arrays
+ * @property {boolean|number} [history] - keep a per-instance ring buffer of recent values. `true` enables it with a 100-entry limit; a positive number sets a custom limit (default off). History is in-memory only and is not synced across instances. Use `@prsm/workflow` for a durable audit trail
+ * @property {object} [metadata] - free-form, opaque bag (descriptions, owner, units, tags) stored on the cell and surfaced through `cells()`. Does not affect propagation, compute, or any runtime behavior
+ * @property {object} [source] - opaque descriptor of where a cell's values come from (polled API, webhook, queue worker, file watcher), surfaced through `cells()` for tooling. Does not affect any runtime behavior
+ */
+
+/**
+ * @typedef {Object} CellState
+ * The full state of a cell, returned by `get` and passed to value listeners.
+ * @property {any} value - the cell's current value. Retained even while `status` is `stale` or `error`, so a dashboard can keep showing the last good value
+ * @property {"uninitialized"|"pending"|"current"|"stale"|"error"} status - `uninitialized` (no value yet), `pending` (computing), `current` (value is fresh), `stale` (an upstream change or error means this value may be out of date but is still shown), or `error` (last computation threw)
+ * @property {Error|null} error - the error from the last failed computation, or `null`
+ * @property {number|null} updatedAt - epoch milliseconds of the last value update, or `null` if never updated
+ * @property {number|null} computeTime - milliseconds the last computation took, or `null` for cells that have not computed
+ */
+
+/**
+ * @typedef {Object} CellInfo
+ * One entry in the topology returned by `cells`.
+ * @property {string} name - the cell's name
+ * @property {"source"|"computed"} type - whether values are pushed in (`source`) or derived from other cells (`computed`)
+ * @property {"source"|"computed"|"template"} kind - like `type`, but distinguishes a `template` cell from a plain `computed` one so tooling can render it specially
+ * @property {string[]} deps - names of the cells this cell depends on
+ * @property {string[]} dependents - names of the cells that depend on this one
+ * @property {"uninitialized"|"pending"|"current"|"stale"|"error"} status - the cell's current status
+ * @property {object} [metadata] - present only when set via options
+ * @property {object} [source] - present only when set via options
+ * @property {string} [template] - the raw template body, present only on template cells
+ * @property {number} [historyLimit] - the history ring-buffer size, present only when history is enabled
+ */
+
+/**
+ * @typedef {Object} HistoryEntry
+ * @property {any} value - the recorded value
+ * @property {number} timestamp - epoch milliseconds when the value was recorded
+ */
+
+/**
+ * @callback ValueListener
+ * @param {any} value - the cell's new value
+ * @param {CellState} state - the cell's full state at the time of the change
+ * @returns {void}
+ */
+
+/**
+ * @callback WildcardListener
+ * @param {string} name - the name of the cell that changed
+ * @param {any} value - the cell's new value
+ * @param {CellState} state - the cell's full state at the time of the change
+ * @returns {void}
+ */
+
+/**
+ * @callback ErrorListener
+ * @param {Error} error - the error thrown or rejected by the cell's computation
+ * @param {CellState} state - the cell's full state at the time of the error
+ * @returns {void}
+ */
+
+/**
+ * @typedef {Object} ListenerOptions
+ * Rate-limiting options for `Cell.on` and the wildcard `on`. At most one of `debounce` or `throttle` may be set.
+ * @property {string|number} [debounce] - fire the listener only after this much quiet time has passed since the last change, as a duration string or milliseconds. Each new change resets the timer
+ * @property {string|number} [throttle] - fire the listener at most once per this interval, as a duration string or milliseconds. The trailing change in a window still fires once the interval elapses
+ */
+
+/**
+ * @callback PollFn
+ * @returns {any|Promise<any>} the cell's next value. May be async (fetch, query, etc). If it throws, the cell enters error state and polling continues
+ */
+
+/**
+ * A cell handle returned by `cell` and `template`. Calling it with no arguments reads
+ * the current value (and registers a dependency when called inside another cell's handler);
+ * calling it with one argument sets the value (source cells only). Carries methods for
+ * observing, polling, and removing the cell.
+ * @typedef {Object} Cell
+ * @property {string} name - the cell's name (read-only)
+ * @property {CellState} state - the cell's current state (read-only accessor)
+ * @property {(value?: any) => any} __call - read the value with no args, or set it with one arg
+ * @property {(callback: ValueListener, opts?: ListenerOptions) => (() => void)} on - subscribe to value changes. Returns an unsubscribe function. Does not fire on errors; use `onError`. In distributed mode this fires on every instance that has the cell defined
+ * @property {(callback: ErrorListener) => (() => void)} onError - subscribe to computation errors. Returns an unsubscribe function
+ * @property {(fn: PollFn, interval: string|number) => Cell} poll - refresh this source cell by calling `fn` every `interval` (duration string or ms). In distributed mode only one instance polls per tick. Throws if the cell is computed
+ * @property {() => void} stop - stop polling this cell on this instance. The cell keeps its last value
+ * @property {() => void} remove - remove this cell. Throws if other cells depend on it
+ * @property {() => void} removeTree - remove this cell and everything downstream of it
+ */
+
 const tracking = new AsyncLocalStorage()
 
 function parseTemplateDeps(str) {
@@ -111,6 +220,14 @@ function wrapListener(callback, opts) {
   return wrapped
 }
 
+/**
+ * Create a reactive computation graph: a DAG of named cells where a change to one
+ * cell propagates to everything downstream in topological order. Source cells hold
+ * values pushed in externally; computed cells derive their values from other cells
+ * and may be sync or async. Returns a plain object of methods, not a class.
+ * @param {GraphOptions} [options]
+ * @returns {Graph}
+ */
 export function createGraph(options = {}) {
   const tracer = options.tracer ?? null
   const prefix = options.prefix ?? DEFAULT_PREFIX
@@ -389,6 +506,17 @@ export function createGraph(options = {}) {
     return 0
   }
 
+  /**
+   * Define a cell. Pass a value to create a source cell whose value is pushed in via
+   * the cell handle or `set`. Pass a function to create a computed cell: dependencies
+   * are discovered automatically from the other cells the function reads, and the cell
+   * recomputes whenever any of them change. The function may be sync or async (return a
+   * promise to call an LLM, fetch an API, query a database, and so on).
+   * @param {string} name - the cell name. Throws if a cell with this name already exists
+   * @param {any|(() => any|Promise<any>)} valueOrFn - the initial value for a source cell, or the handler for a computed cell
+   * @param {CellOptions} [maybeOptions]
+   * @returns {Cell} a handle for reading, setting, observing, polling, and removing the cell
+   */
   function cell(name, valueOrFn, maybeOptions) {
     assertNotDestroyed()
     if (cells.has(name)) throw new Error(`cell already exists: ${name}`)
@@ -447,6 +575,19 @@ export function createGraph(options = {}) {
     return acc
   }
 
+  /**
+   * Define a computed cell whose value is a rendered template string. Dependencies are
+   * discovered by parsing `{{...}}` references in the body: `{{path}}` resolves a dot or
+   * bracket path against the referenced cell's value, `{{#if path}}...{{/if}}` includes
+   * the body when the value is truthy, object values are JSON-stringified, and
+   * null/undefined render as empty. The cell appears in `cells` with `kind: "template"`
+   * and the raw body in `template`, giving tooling an exact audit trail of the rendered
+   * prompt.
+   * @param {string} name - the cell name. Throws if a cell with this name already exists
+   * @param {string} str - the template body. Throws if not a string
+   * @param {CellOptions} [maybeOptions]
+   * @returns {Cell}
+   */
   function template(name, str, maybeOptions) {
     assertNotDestroyed()
     if (typeof str !== "string") {
@@ -470,6 +611,15 @@ export function createGraph(options = {}) {
     return acc
   }
 
+  /**
+   * Read the recent value history of a cell. Returns entries oldest-first. Only cells
+   * created with the `history` option record history; others return `[]`. Entries are
+   * recorded when the value actually changes (after the equality check). History is
+   * per-instance and in-memory only, not synced across instances.
+   * @param {string} name - the cell name
+   * @param {number} [limit] - return only the most recent `limit` entries
+   * @returns {HistoryEntry[]}
+   */
   function history(name, limit) {
     const buf = histories.get(name)
     if (!buf) return []
@@ -618,6 +768,15 @@ export function createGraph(options = {}) {
     return true
   }
 
+  /**
+   * Update a source cell's value and propagate the change to all downstream cells. No-op
+   * if the new value is equal to the current one (per the cell's equality test). In
+   * distributed mode the value is written to Redis and published so every instance
+   * converges, while downstream computation runs on whichever instance wins the lock.
+   * @param {string} name - the cell name. Throws if the cell does not exist
+   * @param {any} value - the new value. Throws if the cell is computed (computed cells derive their values)
+   * @returns {void}
+   */
   function set(name, value) {
     assertNotDestroyed()
     const c = cells.get(name)
@@ -729,6 +888,13 @@ export function createGraph(options = {}) {
     }
   }
 
+  /**
+   * Read a cell's full state, not just its value, so callers can tell whether a value is
+   * fresh, stale, or errored. In distributed mode this reads from the local cache kept in
+   * sync via pub/sub, so it does not hit Redis on every call.
+   * @param {string} name - the cell name
+   * @returns {CellState|null} the cell's state, or `null` if no such cell exists
+   */
   function getState(name) {
     const c = cells.get(name)
     if (!c) return null
@@ -741,6 +907,13 @@ export function createGraph(options = {}) {
     }
   }
 
+  /**
+   * Read just a cell's current value, a convenience over `get(name).value`. Returns
+   * `undefined` if the cell has not produced a value yet or is in error. Called inside a
+   * computed cell's handler, it registers a dependency on the named cell.
+   * @param {string} name - the cell name
+   * @returns {any} the value, or `undefined`
+   */
   function value(name) {
     const tracker = tracking.getStore()
     if (tracker) tracker.deps.add(name)
@@ -749,6 +922,12 @@ export function createGraph(options = {}) {
     return c.value
   }
 
+  /**
+   * Serialize every cell's current value into a plain object keyed by cell name. Cells
+   * that are uninitialized or in error are omitted. Handy for writing the whole graph as
+   * a single realtime record and letting the client diff it.
+   * @returns {Object<string, any>}
+   */
   function snapshot() {
     const snap = {}
     for (const [name, c] of cells) {
@@ -759,6 +938,15 @@ export function createGraph(options = {}) {
     return snap
   }
 
+  /**
+   * Subscribe to changes on any cell in the graph (the wildcard listener). To observe a
+   * single cell, use the handle returned by `cell`: `g.cell(name).on(cb)`. In distributed
+   * mode this fires on every instance whenever a value changes, since listeners are meant
+   * for local side effects (logging, pushing to locally-connected clients, and so on).
+   * @param {WildcardListener} callback - receives `(name, value, state)` on every cell change
+   * @param {ListenerOptions} [opts]
+   * @returns {() => void} an unsubscribe function
+   */
   function on(callback, opts) {
     assertNotDestroyed()
     const wrapped = wrapListener(callback, opts)
@@ -888,6 +1076,12 @@ export function createGraph(options = {}) {
     if (redis) redis.deleteValue(name).catch(() => {})
   }
 
+  /**
+   * Return the full graph topology with each cell's current status: names, types, deps,
+   * dependents, and any metadata, source, template, or history limit that was set. Useful
+   * for devtools and debugging.
+   * @returns {CellInfo[]}
+   */
   function getCells() {
     const result = []
     for (const [name, c] of cells) {
@@ -917,6 +1111,13 @@ export function createGraph(options = {}) {
     try { await redis.writeRegistry(getCells(), REGISTRY_TTL_SEC) } catch {}
   }
 
+  /**
+   * Gather each connected instance's view of the topology, keyed by instance id. Every
+   * instance periodically publishes its `cells()` to Redis with a TTL, so this reflects
+   * the live fleet. In local mode it returns a single `"local"` entry with this graph's
+   * topology.
+   * @returns {Promise<Object<string, CellInfo[]>>}
+   */
   async function getTopologyAcrossInstances() {
     if (!redis) return { [redis?.instanceId ?? "local"]: getCells() }
     const remote = await redis.getAllRegistries()
@@ -924,6 +1125,13 @@ export function createGraph(options = {}) {
     return remote
   }
 
+  /**
+   * Initialize distributed mode: connect to Redis, restore current cell values from
+   * Redis, subscribe to the pub/sub sync channel, and start publishing this instance's
+   * topology. Must be called before `set`/`get` when a `redis` option was provided. No-op
+   * in local mode, so it is always safe to call.
+   * @returns {Promise<void>}
+   */
   async function ready() {
     if (!options.redis) return
 
@@ -979,6 +1187,12 @@ export function createGraph(options = {}) {
     })
   }
 
+  /**
+   * Tear down the graph: stop all polling and debounce timers, clear every cell, drop all
+   * listeners, and disconnect the Redis clients in distributed mode. The graph is unusable
+   * afterward.
+   * @returns {Promise<void>}
+   */
   async function destroy() {
     destroyed = true
     if (registryTimer) { clearInterval(registryTimer); registryTimer = null }
@@ -1004,6 +1218,21 @@ export function createGraph(options = {}) {
     }
   }
 
+  /**
+   * @typedef {Object} Graph
+   * @property {typeof cell} cell - define a source or computed cell
+   * @property {typeof template} template - define a templated string cell
+   * @property {typeof history} history - read a cell's recent value history
+   * @property {typeof set} set - update a source cell and propagate downstream
+   * @property {typeof getState} get - read a cell's full state
+   * @property {typeof value} value - read just a cell's value
+   * @property {typeof snapshot} snapshot - serialize all cell values to a plain object
+   * @property {typeof on} on - subscribe to changes on any cell (wildcard listener)
+   * @property {typeof getCells} cells - read the full graph topology with statuses
+   * @property {typeof getTopologyAcrossInstances} cellsAcrossInstances - read every instance's topology, keyed by instance id
+   * @property {typeof ready} ready - initialize distributed mode (no-op in local mode)
+   * @property {typeof destroy} destroy - tear down the graph
+   */
   const graph = {
     cell,
     template,

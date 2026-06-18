@@ -5,15 +5,19 @@
   "type": "module",
   "exports": {
     ".": {
+      "types": "./types/index.d.ts",
       "default": "./src/index.js"
     }
   },
+  "types": "./types/index.d.ts",
   "files": [
-    "src"
+    "src",
+    "types"
   ],
   "scripts": {
     "test": "vitest --reporter=verbose --run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "prepublishOnly": "npx tsc --declaration --allowJs --emitDeclarationOnly --skipLibCheck --target es2020 --module nodenext --moduleResolution nodenext --strict false --esModuleInterop true --outDir ./types src/index.js src/graph.js src/propagate.js src/redis.js"
   },
   "keywords": [
     "reactive",
@@ -31,6 +35,7 @@
   },
   "devDependencies": {
     "@prsm/trace": "^1.2.0",
+    "typescript": "^5.9.3",
     "vitest": "^3.2.4"
   },
   "engines": {

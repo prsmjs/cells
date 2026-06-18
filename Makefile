@@ -16,6 +16,13 @@ test: ## Run tests
 test-watch: ## Run tests in watch mode
 	npx vitest
 
+types: ## Generate .d.ts from JSDoc
+	npx tsc --declaration --allowJs --emitDeclarationOnly --skipLibCheck \
+		--target es2020 --module nodenext --moduleResolution nodenext \
+		--strict false --esModuleInterop true --outDir ./types \
+		src/index.js src/graph.js src/propagate.js src/redis.js
+
+.PHONY: types
 .PHONY: help
 help: ## Show help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(firstword $(MAKEFILE_LIST)) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[32m%-20s\033[0m %s\n", $$1, $$2}'
