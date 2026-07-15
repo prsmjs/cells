@@ -2,11 +2,18 @@ import { createClient } from "redis"
 import { randomUUID } from "crypto"
 import { mutex } from "@prsm/lock"
 
+// node-redis only reads host/port from the nested socket object and silently
+// ignores them at the top level, so lift the documented flat fields into place
+function toClientOptions({ host, port, ...rest } = {}) {
+  if (rest.url || (host === undefined && port === undefined)) return rest
+  return { ...rest, socket: { host: host ?? "127.0.0.1", port: port ?? 6379, ...rest.socket } }
+}
+
 export function createRedisManager(options, prefix) {
   const instanceId = randomUUID()
-  const client = createClient(options)
+  const client = createClient(toClientOptions(options))
   client.on("error", () => {})
-  const lock = mutex({ redis: options, prefix })
+  const lock = mutex({ redis: toClientOptions(options), prefix })
 
   let subClient = null
   let connected = false
